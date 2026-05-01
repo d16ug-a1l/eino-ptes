@@ -21,6 +21,7 @@ type Server struct {
 	orchestrator *Orchestrator
 	upgrader    websocket.Upgrader
 	wsClients   map[*websocket.Conn]bool
+	wsWriteMu   map[*websocket.Conn]*sync.Mutex
 	wsMu        sync.RWMutex
 	httpServer  *http.Server
 	tcpListener net.Listener
@@ -39,6 +40,7 @@ func NewServer(addr, tcpAddr string, mm *MemberManager, sched *Scheduler, orch *
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 		wsClients: make(map[*websocket.Conn]bool),
+		wsWriteMu: make(map[*websocket.Conn]*sync.Mutex),
 		stopCh:    make(chan struct{}),
 	}
 
@@ -58,7 +60,7 @@ func NewServer(addr, tcpAddr string, mm *MemberManager, sched *Scheduler, orch *
 }
 
 func (s *Server) Run(ctx context.Context) error {
-	s.wg.Add(2)
+	s.wg.Add(3)
 	go s.runTCPServer(ctx)
 	go s.runHTTPServer(ctx)
 	go s.heartbeatCleanup(ctx)
@@ -112,6 +114,7 @@ func (s *Server) runHTTPServer(ctx context.Context) {
 }
 
 func (s *Server) heartbeatCleanup(ctx context.Context) {
+	defer s.wg.Done()
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -192,11 +195,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	s.wsMu.Lock()
 	s.wsClients[conn] = true
+	s.wsWriteMu[conn] = &sync.Mutex{}
 	s.wsMu.Unlock()
 
 	defer func() {
 		s.wsMu.Lock()
 		delete(s.wsClients, conn)
+		delete(s.wsWriteMu, conn)
 		s.wsMu.Unlock()
 	}()
 
@@ -218,7 +223,15 @@ func (s *Server) BroadcastGraphUpdate(update protocol.GraphNodeUpdate) {
 
 	data, _ := json.Marshal(update)
 	for _, c := range clients {
+		s.wsMu.RLock()
+		mu, ok := s.wsWriteMu[c]
+		s.wsMu.RUnlock()
+		if !ok {
+			continue
+		}
+		mu.Lock()
 		_ = c.WriteMessage(websocket.TextMessage, data)
+		mu.Unlock()
 	}
 }
 
