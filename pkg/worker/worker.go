@@ -156,17 +156,7 @@ func (w *Worker) handleToolCall(ctx context.Context, tc schema.ToolCall) {
 	w.current = tc.ID
 	w.mu.Unlock()
 
-	var task protocol.Task
-	if err := json.Unmarshal([]byte(tc.Function.Arguments), &task); err != nil {
-		w.reportError(tc.ID, tc.Function.Name, err)
-		w.mu.Lock()
-		w.status = protocol.WorkerStatusIdle
-		w.current = ""
-		w.mu.Unlock()
-		return
-	}
-
-	result, err := w.executor.Execute(ctx, task)
+	result, err := w.executor.ExecuteTool(ctx, tc.ID, tc.Function.Name, tc.Function.Arguments)
 
 	w.mu.Lock()
 	w.status = protocol.WorkerStatusIdle

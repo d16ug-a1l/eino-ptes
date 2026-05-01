@@ -167,6 +167,7 @@ func (s *Server) handleWorkerConn(ctx context.Context, conn net.Conn) {
 				workerID = info.ID
 				s.memberMgr.Register(info)
 				s.scheduler.RegisterConn(workerID, encoder)
+				s.orchestrator.RefreshToolSet()
 				log.Printf("worker registered: %s (%s)", info.ID, info.Name)
 			}
 
@@ -268,19 +269,30 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 
 		// Natural language task planning path
 		if req.Description != "" {
-			plan, err := s.orchestrator.PlanTask(r.Context(), req.Description)
-			if err != nil {
-				http.Error(w, "plan task: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			task, err := s.orchestrator.CreateTask(r.Context(), protocol.TaskType(plan.Phases[0].Phase), plan.Target, nil)
+			desc := req.Description
+			task, err := s.orchestrator.CreateTask(r.Context(), protocol.TaskType("planning"), "", nil)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 
 			go func() {
+				plan, err := s.orchestrator.PlanTask(context.Background(), desc)
+				if err != nil {
+					log.Printf("plan task %s error: %v", task.ID, err)
+					task.Status = protocol.TaskStatusFailed
+					task.Result = &schema.ToolResult{
+						Parts: []schema.ToolOutputPart{
+							{Type: schema.ToolPartTypeText, Text: "规划失败: " + err.Error()},
+						},
+					}
+					s.orchestrator.taskStore.Save(task)
+					return
+				}
+				task.Type = protocol.TaskType(plan.Phases[0].Phase)
+				task.Target = plan.Target
+				s.orchestrator.taskStore.Save(task)
+
 				if err := s.orchestrator.ExecuteTaskWithPlan(context.Background(), task, plan); err != nil {
 					log.Printf("execute task with plan %s error: %v", task.ID, err)
 				}

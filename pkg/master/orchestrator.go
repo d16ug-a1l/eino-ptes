@@ -9,6 +9,7 @@ import (
 
 	"github.com/cloudwego/eino-ptes/pkg/protocol"
 	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
@@ -29,6 +30,8 @@ type Orchestrator struct {
 	taskStore     *TaskStore
 	analyzer      ScanAnalyzer
 	planner       Planner
+	toolProvider  func() []tool.BaseTool
+	toolSet       map[string]tool.EnhancedInvokableTool
 	mu            sync.RWMutex
 	runningTasks  map[string]context.CancelFunc
 	compiledGraph compose.Runnable[*PTESState, *PTESState]
@@ -91,9 +94,33 @@ func NewOrchestrator(scheduler *Scheduler, memberMgr *MemberManager, graphState 
 		taskStore:    NewTaskStore(),
 		analyzer:     analyzer,
 		planner:      planner,
+		toolSet:      make(map[string]tool.EnhancedInvokableTool),
 		runningTasks: make(map[string]context.CancelFunc),
 	}
 	return o
+}
+
+func (o *Orchestrator) SetToolProvider(fn func() []tool.BaseTool) {
+	o.toolProvider = fn
+}
+
+func (o *Orchestrator) RefreshToolSet() {
+	if o.toolProvider == nil {
+		return
+	}
+	tools := o.toolProvider()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.toolSet = make(map[string]tool.EnhancedInvokableTool, len(tools))
+	for _, t := range tools {
+		info, err := t.Info(context.Background())
+		if err != nil {
+			continue
+		}
+		if et, ok := t.(tool.EnhancedInvokableTool); ok {
+			o.toolSet[info.Name] = et
+		}
+	}
 }
 
 func (o *Orchestrator) InitGraph(ctx context.Context) error {
@@ -233,7 +260,7 @@ func (o *Orchestrator) runPhaseNode(ctx context.Context, state *PTESState, nodeN
 		Target: state.Target,
 		Params: state.Params,
 	}
-	result, err := o.dispatchAndWait(ctx, task, toolName)
+	result, err := o.invokeTool(ctx, task, toolName)
 
 	if o.graphState != nil {
 		if err != nil {
@@ -271,28 +298,25 @@ func (o *Orchestrator) runPhaseNode(ctx context.Context, state *PTESState, nodeN
 	return state, err
 }
 
-func (o *Orchestrator) dispatchAndWait(ctx context.Context, task *protocol.Task, toolName string) (*schema.ToolResult, error) {
-	msg := protocol.DispatchTaskMessage(task)
-	// override tool call name to match actual tool
-	if len(msg.ToolCalls) > 0 {
-		msg.ToolCalls[0].Function.Name = toolName
+func (o *Orchestrator) invokeTool(ctx context.Context, task *protocol.Task, toolName string) (*schema.ToolResult, error) {
+	o.mu.RLock()
+	t, ok := o.toolSet[toolName]
+	o.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("tool %s not available in tool set", toolName)
 	}
 
-	resultMsg, err := o.scheduler.DispatchToolCall(ctx, msg)
-	if err != nil {
-		return nil, err
+	args := map[string]interface{}{
+		"target": task.Target,
 	}
-
-	result := protocol.ExtractToolResult(resultMsg)
-	if result == nil && resultMsg != nil {
-		result = &schema.ToolResult{
-			Parts: []schema.ToolOutputPart{
-				{Type: schema.ToolPartTypeText, Text: resultMsg.Content},
-			},
+	if task.Params != nil {
+		for k, v := range task.Params {
+			args[k] = v
 		}
 	}
+	argsJSON, _ := json.Marshal(args)
 
-	return result, nil
+	return t.InvokableRun(ctx, &schema.ToolArgument{Text: string(argsJSON)})
 }
 
 func (o *Orchestrator) PlanTask(ctx context.Context, description string) (*TaskPlan, error) {

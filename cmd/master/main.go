@@ -9,8 +9,10 @@ import (
 	"syscall"
 
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
 	openaiModel "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino-ptes/pkg/master"
+	"github.com/cloudwego/eino-ptes/pkg/remote"
 )
 
 func main() {
@@ -53,6 +55,10 @@ func main() {
 	}
 
 	orch := master.NewOrchestrator(sched, mm, gs, analyzer, planner)
+	orch.SetToolProvider(func() []tool.BaseTool {
+		return remote.RemoteToolSet(sched, mm)
+	})
+	orch.RefreshToolSet()
 
 	server := master.NewServer(*httpAddr, *tcpAddr, mm, sched, orch)
 	gs.SetServer(server)
