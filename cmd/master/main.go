@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/cloudwego/eino/components/model"
 	openaiModel "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino-ptes/pkg/master"
 )
@@ -26,7 +27,7 @@ func main() {
 	sched := master.NewScheduler(mm)
 	gs := master.NewGraphState()
 
-	var analyzer master.ScanAnalyzer
+	var chatModel model.BaseChatModel
 	if *modelAPIKey != "" && *modelName != "" {
 		cfg := &openaiModel.ChatModelConfig{
 			APIKey:  *modelAPIKey,
@@ -34,17 +35,24 @@ func main() {
 			Model:   *modelName,
 			Timeout: 0,
 		}
-		chatModel, err := openaiModel.NewChatModel(context.Background(), cfg)
+		cm, err := openaiModel.NewChatModel(context.Background(), cfg)
 		if err != nil {
 			log.Fatalf("failed to create chat model: %v", err)
 		}
-		analyzer = master.NewLLMScanAnalyzer(chatModel)
-		log.Printf("LLM analyzer enabled: model=%s, baseURL=%s", *modelName, *modelBaseURL)
+		chatModel = cm
+		log.Printf("LLM model enabled: model=%s, baseURL=%s", *modelName, *modelBaseURL)
 	} else {
-		log.Println("LLM analyzer disabled: set -model-key and -model (or env vars) to enable")
+		log.Println("LLM model disabled: set -model-key and -model (or env vars) to enable")
 	}
 
-	orch := master.NewOrchestrator(sched, mm, gs, analyzer)
+	var analyzer master.ScanAnalyzer
+	var planner master.Planner
+	if chatModel != nil {
+		analyzer = master.NewLLMScanAnalyzer(chatModel)
+		planner = master.NewLLMPlanner(chatModel)
+	}
+
+	orch := master.NewOrchestrator(sched, mm, gs, analyzer, planner)
 
 	server := master.NewServer(*httpAddr, *tcpAddr, mm, sched, orch)
 	gs.SetServer(server)

@@ -570,13 +570,16 @@
                 <div class="top-section">
                     <div class="panel" style="margin-bottom: 0;">
                         <h2>新建任务</h2>
-                        <div class="task-form">
-                            <select id="taskType">
-                                <option value="reconnaissance">信息收集</option>
-                                <option value="vulnerability_scan">漏洞扫描</option>
-                            </select>
-                            <input type="text" id="taskTarget" placeholder="目标地址 (如 192.168.1.100)" style="flex:1;min-width:200px;">
-                            <button onclick="createTask()">执行任务</button>
+                        <div class="task-form" style="flex-direction: column; align-items: stretch;">
+                            <textarea id="taskDescription" placeholder="输入渗透测试目标描述，例如：扫描 192.168.1.100 的开放端口和漏洞" style="width:100%; min-height: 60px; background:#21262d; border:1px solid #30363d; color:#c9d1d9; padding:8px 12px; border-radius:6px; font-size:13px; resize:vertical;"></textarea>
+                            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                                <select id="taskType">
+                                    <option value="reconnaissance">信息收集</option>
+                                    <option value="vulnerability_scan">漏洞扫描</option>
+                                </select>
+                                <input type="text" id="taskTarget" placeholder="目标地址 (如 192.168.1.100)" style="flex:1;min-width:200px;">
+                                <button onclick="createTask()">执行任务</button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -930,22 +933,26 @@
         }
 
         function createTask() {
+            const description = document.getElementById('taskDescription').value.trim();
             const type = document.getElementById('taskType').value;
-            const target = document.getElementById('taskTarget').value;
-            if (!target) return alert('请输入目标地址');
+            const target = document.getElementById('taskTarget').value.trim();
+
+            if (!description && !target) return alert('请输入目标地址或任务描述');
+
+            const body = description
+                ? { description }
+                : { type, target };
 
             fetch('/api/tasks', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ type, target })
+                body: JSON.stringify(body)
             }).then(r => r.json()).then(data => {
+                document.getElementById('taskDescription').value = '';
                 document.getElementById('taskTarget').value = '';
                 selectedTaskId = data.id;
                 expandedNode = null;
                 taskGraphs[data.id] = { nodes: {} };
-                if (type === 'reconnaissance') {
-                    taskGraphs[data.id].nodes['reconnaissance'] = { task_id: data.id, node_name: 'reconnaissance', state: 'pending' };
-                }
                 fetchTasks();
             });
         }

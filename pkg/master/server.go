@@ -256,15 +256,43 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(tasks)
 	case http.MethodPost:
 		var req struct {
-			Type   string                 `json:"type"`
-			Target string                 `json:"target"`
-			Params map[string]interface{} `json:"params,omitempty"`
+			Description string                 `json:"description,omitempty"`
+			Type        string                 `json:"type,omitempty"`
+			Target      string                 `json:"target,omitempty"`
+			Params      map[string]interface{} `json:"params,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
+		// Natural language task planning path
+		if req.Description != "" {
+			plan, err := s.orchestrator.PlanTask(r.Context(), req.Description)
+			if err != nil {
+				http.Error(w, "plan task: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			task, err := s.orchestrator.CreateTask(r.Context(), protocol.TaskType(plan.Phases[0].Phase), plan.Target, nil)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			go func() {
+				if err := s.orchestrator.ExecuteTaskWithPlan(context.Background(), task, plan); err != nil {
+					log.Printf("execute task with plan %s error: %v", task.ID, err)
+				}
+			}()
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(task)
+			return
+		}
+
+		// Traditional explicit task path
 		task, err := s.orchestrator.CreateTask(r.Context(), protocol.TaskType(req.Type), req.Target, req.Params)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
