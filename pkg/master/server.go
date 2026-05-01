@@ -10,23 +10,24 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino-ptes/pkg/protocol"
+	"github.com/cloudwego/eino/schema"
 	"github.com/gorilla/websocket"
 )
 
 type Server struct {
-	addr        string
-	tcpAddr     string
-	memberMgr   *MemberManager
-	scheduler   *Scheduler
+	addr         string
+	tcpAddr      string
+	memberMgr    *MemberManager
+	scheduler    *Scheduler
 	orchestrator *Orchestrator
-	upgrader    websocket.Upgrader
-	wsClients   map[*websocket.Conn]bool
-	wsWriteMu   map[*websocket.Conn]*sync.Mutex
-	wsMu        sync.RWMutex
-	httpServer  *http.Server
-	tcpListener net.Listener
-	wg          sync.WaitGroup
-	stopCh      chan struct{}
+	upgrader     websocket.Upgrader
+	wsClients    map[*websocket.Conn]bool
+	wsWriteMu    map[*websocket.Conn]*sync.Mutex
+	wsMu         sync.RWMutex
+	httpServer   *http.Server
+	tcpListener  net.Listener
+	wg           sync.WaitGroup
+	stopCh       chan struct{}
 }
 
 func NewServer(addr, tcpAddr string, mm *MemberManager, sched *Scheduler, orch *Orchestrator) *Server {
@@ -145,7 +146,7 @@ func (s *Server) handleWorkerConn(ctx context.Context, conn net.Conn) {
 		default:
 		}
 
-		var msg protocol.Message
+		var msg schema.Message
 		if err := decoder.Decode(&msg); err != nil {
 			if workerID != "" {
 				s.scheduler.UnregisterConn(workerID)
@@ -154,33 +155,30 @@ func (s *Server) handleWorkerConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 
-		switch msg.Type {
-		case protocol.MsgTypeRegister:
-			payloadBytes, _ := json.Marshal(msg.Payload)
-			var info protocol.WorkerInfo
-			_ = json.Unmarshal(payloadBytes, &info)
-			workerID = info.ID
-			s.memberMgr.Register(&info)
-			s.scheduler.RegisterConn(workerID, encoder)
-			log.Printf("worker registered: %s (%s)", info.ID, info.Name)
+		switch msg.Role {
+		case schema.User:
+			info := protocol.ExtractWorkerInfo(&msg)
+			if info != nil {
+				workerID = info.ID
+				s.memberMgr.Register(info)
+				s.scheduler.RegisterConn(workerID, encoder)
+				log.Printf("worker registered: %s (%s)", info.ID, info.Name)
+			}
 
-		case protocol.MsgTypeHeartbeat:
-			payloadBytes, _ := json.Marshal(msg.Payload)
-			var hb protocol.Heartbeat
-			_ = json.Unmarshal(payloadBytes, &hb)
-			s.memberMgr.UpdateHeartbeat(&hb)
+		case schema.System:
+			hb := protocol.ExtractHeartbeat(&msg)
+			if hb != nil {
+				s.memberMgr.UpdateHeartbeat(hb)
+			}
 
-		case protocol.MsgTypeReportResult:
-			payloadBytes, _ := json.Marshal(msg.Payload)
-			var payload map[string]interface{}
-			_ = json.Unmarshal(payloadBytes, &payload)
-			taskID, _ := payload["task_id"].(string)
-			resultBytes, _ := json.Marshal(payload["result"])
-			var result protocol.TaskResult
-			_ = json.Unmarshal(resultBytes, &result)
-			if taskID != "" {
-				s.orchestrator.OnTaskResult(taskID, &result)
-				log.Printf("task %s result received", taskID)
+		case schema.Tool:
+			if msg.ToolCallID != "" {
+				result := protocol.ExtractToolResult(&msg)
+				if result != nil {
+					s.orchestrator.OnTaskResult(msg.ToolCallID, result)
+					log.Printf("tool result received for %s", msg.ToolCallID)
+				}
+				s.scheduler.OnToolResult(msg.ToolCallID, &msg)
 			}
 		}
 	}

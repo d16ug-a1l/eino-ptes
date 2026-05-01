@@ -10,6 +10,7 @@ import (
 	"github.com/cloudwego/eino-ptes/pkg/protocol"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 )
 
 // PTESState is the state object passed through the Eino Graph nodes.
@@ -17,7 +18,7 @@ type PTESState struct {
 	TaskID  string
 	Target  string
 	Params  map[string]interface{}
-	Results map[protocol.TaskType]*protocol.TaskResult
+	Results map[protocol.TaskType]*schema.ToolResult
 }
 
 type Orchestrator struct {
@@ -27,7 +28,6 @@ type Orchestrator struct {
 	taskStore     *TaskStore
 	mu            sync.RWMutex
 	runningTasks  map[string]context.CancelFunc
-	resultWaits   map[string]chan *protocol.TaskResult
 	compiledGraph compose.Runnable[*PTESState, *PTESState]
 }
 
@@ -58,16 +58,12 @@ func (ts *TaskStore) Get(id string) *protocol.Task {
 	return ts.tasks[id]
 }
 
-func (ts *TaskStore) UpdateResult(id string, result *protocol.TaskResult) {
+func (ts *TaskStore) UpdateResult(id string, result *schema.ToolResult) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	if t, ok := ts.tasks[id]; ok {
 		t.Result = result
-		if result.Error != "" {
-			t.Status = protocol.TaskStatusFailed
-		} else {
-			t.Status = protocol.TaskStatusCompleted
-		}
+		t.Status = protocol.TaskStatusCompleted
 	}
 }
 
@@ -88,7 +84,6 @@ func NewOrchestrator(scheduler *Scheduler, memberMgr *MemberManager, graphState 
 		graphState:   graphState,
 		taskStore:    NewTaskStore(),
 		runningTasks: make(map[string]context.CancelFunc),
-		resultWaits:  make(map[string]chan *protocol.TaskResult),
 	}
 	return o
 }
@@ -130,7 +125,7 @@ func (o *Orchestrator) buildGraph() (*compose.Graph[*PTESState, *PTESState], err
 
 	// Branch: if recon succeeded, go to vuln_scan; otherwise END
 	branch := compose.NewGraphBranch[*PTESState](func(ctx context.Context, state *PTESState) (string, error) {
-		if r := state.Results[protocol.TaskTypeReconnaissance]; r != nil && r.Error == "" {
+		if r := state.Results[protocol.TaskTypeReconnaissance]; r != nil {
 			return "vulnerability_scan", nil
 		}
 		return compose.END, nil
@@ -170,38 +165,40 @@ func (o *Orchestrator) vulnScanNode(ctx context.Context, state *PTESState) (*PTE
 	return state, err
 }
 
-func (o *Orchestrator) dispatchAndWait(ctx context.Context, task *protocol.Task, capability string) (*protocol.TaskResult, error) {
-	resultCh := make(chan *protocol.TaskResult, 1)
+func (o *Orchestrator) dispatchAndWait(ctx context.Context, task *protocol.Task, toolName string) (*schema.ToolResult, error) {
+	msg := protocol.DispatchTaskMessage(task)
+	// override tool call name to match actual tool
+	if len(msg.ToolCalls) > 0 {
+		msg.ToolCalls[0].Function.Name = toolName
+	}
 
-	o.mu.Lock()
-	o.resultWaits[task.ID+"_"+string(task.Type)] = resultCh
-	o.mu.Unlock()
-	defer func() {
-		o.mu.Lock()
-		delete(o.resultWaits, task.ID+"_"+string(task.Type))
-		o.mu.Unlock()
-	}()
-
-	_, err := o.scheduler.Dispatch(ctx, task, capability)
+	resultMsg, err := o.scheduler.DispatchToolCall(ctx, msg)
 	if err != nil {
 		return nil, err
 	}
 
-	select {
-	case result := <-resultCh:
-		return result, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	result := protocol.ExtractToolResult(resultMsg)
+	if result == nil && resultMsg != nil {
+		result = &schema.ToolResult{
+			Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: resultMsg.Content},
+			},
+		}
 	}
+
+	return result, nil
 }
 
 func (o *Orchestrator) CreateTask(ctx context.Context, taskType protocol.TaskType, target string, params map[string]interface{}) (*protocol.Task, error) {
+	now := time.Now()
 	task := &protocol.Task{
-		ID:     generateTaskID(),
-		Type:   taskType,
-		Target: target,
-		Params: params,
-		Status: protocol.TaskStatusPending,
+		ID:        generateTaskID(),
+		Type:      taskType,
+		Target:    target,
+		Params:    params,
+		Status:    protocol.TaskStatusPending,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	o.taskStore.Save(task)
 	return task, nil
@@ -231,7 +228,7 @@ func (o *Orchestrator) ExecuteTask(ctx context.Context, task *protocol.Task) err
 		TaskID:  task.ID,
 		Target:  task.Target,
 		Params:  task.Params,
-		Results: make(map[protocol.TaskType]*protocol.TaskResult),
+		Results: make(map[protocol.TaskType]*schema.ToolResult),
 	}
 
 	var handler callbacks.Handler
@@ -247,7 +244,11 @@ func (o *Orchestrator) ExecuteTask(ctx context.Context, task *protocol.Task) err
 	finalState, err := o.compiledGraph.Invoke(ctx, state, opts...)
 	if err != nil {
 		task.Status = protocol.TaskStatusFailed
-		task.Result = &protocol.TaskResult{Error: err.Error()}
+		task.Result = &schema.ToolResult{
+			Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: err.Error()},
+			},
+		}
 		o.taskStore.Save(task)
 		return err
 	}
@@ -260,21 +261,26 @@ func (o *Orchestrator) ExecuteTask(ctx context.Context, task *protocol.Task) err
 			continue
 		}
 		entry := map[string]interface{}{
-			"phase":  string(phase),
-			"output": r.Output,
+			"phase": string(phase),
 		}
-		if r.Error != "" {
-			entry["error"] = r.Error
-			hasError = true
+		var textParts []string
+		for _, p := range r.Parts {
+			if p.Type == schema.ToolPartTypeText {
+				textParts = append(textParts, p.Text)
+			}
 		}
-		if r.Artifacts != nil {
-			entry["artifacts"] = r.Artifacts
+		if len(textParts) > 0 {
+			entry["output"] = textParts
 		}
 		outputs = append(outputs, entry)
 	}
 
 	aggJSON, _ := json.Marshal(map[string]interface{}{"phases": outputs})
-	task.Result = &protocol.TaskResult{Output: string(aggJSON)}
+	task.Result = &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeText, Text: string(aggJSON)},
+		},
+	}
 	if hasError {
 		task.Status = protocol.TaskStatusFailed
 	} else {
@@ -285,30 +291,25 @@ func (o *Orchestrator) ExecuteTask(ctx context.Context, task *protocol.Task) err
 	return nil
 }
 
-func (o *Orchestrator) OnTaskResult(taskID string, result *protocol.TaskResult) {
+func (o *Orchestrator) OnTaskResult(taskID string, result *schema.ToolResult) {
 	o.taskStore.UpdateResult(taskID, result)
 
-	// Determine task type from result artifacts or output
 	var taskType protocol.TaskType
-	if result.Artifacts != nil {
-		if tool, ok := result.Artifacts["tool"].(string); ok {
-			switch tool {
-			case "nmap":
-				taskType = protocol.TaskTypeReconnaissance
-			case "nikto":
-				taskType = protocol.TaskTypeVulnerabilityScan
+	for _, p := range result.Parts {
+		if p.Type == schema.ToolPartTypeText && p.Text != "" {
+			// try to infer task type from result content
+			var data map[string]interface{}
+			if err := json.Unmarshal([]byte(p.Text), &data); err == nil {
+				if tool, ok := data["tool"].(string); ok {
+					switch tool {
+					case "nmap":
+						taskType = protocol.TaskTypeReconnaissance
+					case "nikto":
+						taskType = protocol.TaskTypeVulnerabilityScan
+					}
+				}
 			}
-		}
-	}
-
-	waitKey := taskID + "_" + string(taskType)
-	o.mu.RLock()
-	ch, ok := o.resultWaits[waitKey]
-	o.mu.RUnlock()
-	if ok {
-		select {
-		case ch <- result:
-		default:
+			break
 		}
 	}
 
@@ -318,14 +319,15 @@ func (o *Orchestrator) OnTaskResult(taskID string, result *protocol.TaskResult) 
 			nodeName = "worker"
 		}
 		state := protocol.GraphNodeStateSuccess
-		if result.Error != "" {
-			state = protocol.GraphNodeStateFailed
+		var output string
+		for _, p := range result.Parts {
+			if p.Type == schema.ToolPartTypeText {
+				output = p.Text
+				break
+			}
 		}
-		o.graphState.UpdateNode(taskID, nodeName, state, result.Output, result.Error)
+		o.graphState.UpdateNode(taskID, nodeName, state, output, "")
 	}
-
-	// Note: do NOT cancel context here — graph.Invoke is still running.
-	// Cancel is only for explicit CancelTask requests.
 }
 
 func (o *Orchestrator) CancelTask(taskID string) error {

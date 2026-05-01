@@ -12,7 +12,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// NiktoTool implements Eino tool.InvokableTool for web vulnerability scanning.
+// NiktoTool implements Eino tool.EnhancedInvokableTool for web vulnerability scanning.
 type NiktoTool struct{}
 
 func NewNiktoTool() *NiktoTool {
@@ -37,17 +37,17 @@ func (t *NiktoTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	}, nil
 }
 
-func (t *NiktoTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+func (t *NiktoTool) InvokableRun(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
 	var args struct {
 		Target string `json:"target"`
 		Flags  string `json:"flags,omitempty"`
 	}
-	if err := json.Unmarshal([]byte(argumentsInJSON), &args); err != nil {
-		return "", fmt.Errorf("parse nikto args: %w", err)
+	if err := json.Unmarshal([]byte(toolArgument.Text), &args); err != nil {
+		return nil, fmt.Errorf("parse nikto args: %w", err)
 	}
 
 	if args.Target == "" {
-		return "", fmt.Errorf("nikto: target is required")
+		return nil, fmt.Errorf("nikto: target is required")
 	}
 
 	var cmdArgs []string
@@ -61,18 +61,20 @@ func (t *NiktoTool) InvokableRun(ctx context.Context, argumentsInJSON string, op
 
 	cmd := exec.CommandContext(ctx, "nikto", cmdArgs...)
 	output, err := cmd.CombinedOutput()
+
+	result := &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{
+			{
+				Type: schema.ToolPartTypeText,
+				Text: string(output),
+			},
+		},
+	}
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return string(output), fmt.Errorf("nikto: timeout after 10 minutes")
+			return result, fmt.Errorf("nikto: timeout after 10 minutes")
 		}
-		return string(output), fmt.Errorf("nikto: %w", err)
+		return result, fmt.Errorf("nikto: %w", err)
 	}
-
-	result := map[string]interface{}{
-		"tool":   "nikto",
-		"target": args.Target,
-		"output": string(output),
-	}
-	out, _ := json.Marshal(result)
-	return string(out), nil
+	return result, nil
 }

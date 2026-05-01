@@ -12,7 +12,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// DirbTool implements Eino tool.InvokableTool for web content scanning.
+// DirbTool implements Eino tool.EnhancedInvokableTool for web content scanning.
 type DirbTool struct{}
 
 func NewDirbTool() *DirbTool {
@@ -41,18 +41,18 @@ func (t *DirbTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	}, nil
 }
 
-func (t *DirbTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+func (t *DirbTool) InvokableRun(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
 	var args struct {
 		Target   string `json:"target"`
 		Wordlist string `json:"wordlist,omitempty"`
 		Flags    string `json:"flags,omitempty"`
 	}
-	if err := json.Unmarshal([]byte(argumentsInJSON), &args); err != nil {
-		return "", fmt.Errorf("parse dirb args: %w", err)
+	if err := json.Unmarshal([]byte(toolArgument.Text), &args); err != nil {
+		return nil, fmt.Errorf("parse dirb args: %w", err)
 	}
 
 	if args.Target == "" {
-		return "", fmt.Errorf("dirb: target is required")
+		return nil, fmt.Errorf("dirb: target is required")
 	}
 
 	wordlist := "/usr/share/dirb/wordlists/common.txt"
@@ -71,18 +71,20 @@ func (t *DirbTool) InvokableRun(ctx context.Context, argumentsInJSON string, opt
 
 	cmd := exec.CommandContext(ctx, "dirb", cmdArgs...)
 	output, err := cmd.CombinedOutput()
+
+	result := &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{
+			{
+				Type: schema.ToolPartTypeText,
+				Text: string(output),
+			},
+		},
+	}
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return string(output), fmt.Errorf("dirb: timeout after 10 minutes")
+			return result, fmt.Errorf("dirb: timeout after 10 minutes")
 		}
-		return string(output), fmt.Errorf("dirb: %w", err)
+		return result, fmt.Errorf("dirb: %w", err)
 	}
-
-	result := map[string]interface{}{
-		"tool":   "dirb",
-		"target": args.Target,
-		"output": string(output),
-	}
-	out, _ := json.Marshal(result)
-	return string(out), nil
+	return result, nil
 }

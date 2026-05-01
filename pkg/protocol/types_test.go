@@ -1,33 +1,56 @@
 package protocol
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/cloudwego/eino/schema"
 )
 
-func TestMessageSerialization(t *testing.T) {
-	msg := Message{
-		Type: MsgTypeHeartbeat,
-		Payload: Heartbeat{
-			WorkerID:  "worker-1",
-			Status:    WorkerStatusIdle,
-			Timestamp: time.Now(),
+func TestHeartbeatMessage(t *testing.T) {
+	hb := &Heartbeat{
+		WorkerID:  "worker-1",
+		Status:    WorkerStatusIdle,
+		Timestamp: time.Now(),
+	}
+	msg := HeartbeatMessage(hb)
+
+	if msg.Role != schema.System {
+		t.Errorf("expected role system, got %s", msg.Role)
+	}
+
+	extracted := ExtractHeartbeat(msg)
+	if extracted == nil {
+		t.Fatal("expected to extract heartbeat")
+	}
+	if extracted.WorkerID != "worker-1" {
+		t.Errorf("expected worker-1, got %s", extracted.WorkerID)
+	}
+}
+
+func TestWorkerRegisterMessage(t *testing.T) {
+	info := &WorkerInfo{
+		ID:   "worker-1",
+		Name: "kali-1",
+		ToolInfos: []*schema.ToolInfo{
+			{Name: "nmap", Desc: "network scanner"},
 		},
 	}
+	msg := WorkerRegisterMessage(info)
 
-	data, err := json.Marshal(msg)
-	if err != nil {
-		t.Fatalf("marshal message: %v", err)
+	if msg.Role != schema.User {
+		t.Errorf("expected role user, got %s", msg.Role)
 	}
 
-	var decoded Message
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("unmarshal message: %v", err)
+	extracted := ExtractWorkerInfo(msg)
+	if extracted == nil {
+		t.Fatal("expected to extract worker info")
 	}
-
-	if decoded.Type != MsgTypeHeartbeat {
-		t.Errorf("expected type %s, got %s", MsgTypeHeartbeat, decoded.Type)
+	if extracted.ID != "worker-1" {
+		t.Errorf("expected worker-1, got %s", extracted.ID)
+	}
+	if len(extracted.ToolInfos) != 1 || extracted.ToolInfos[0].Name != "nmap" {
+		t.Errorf("expected 1 tool info with name nmap, got %v", extracted.ToolInfos)
 	}
 }
 

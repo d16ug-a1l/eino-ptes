@@ -12,7 +12,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// NmapTool implements Eino tool.InvokableTool for network scanning.
+// NmapTool implements Eino tool.EnhancedInvokableTool for network scanning.
 type NmapTool struct{}
 
 func NewNmapTool() *NmapTool {
@@ -37,17 +37,17 @@ func (t *NmapTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	}, nil
 }
 
-func (t *NmapTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+func (t *NmapTool) InvokableRun(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
 	var args struct {
 		Target string `json:"target"`
 		Flags  string `json:"flags,omitempty"`
 	}
-	if err := json.Unmarshal([]byte(argumentsInJSON), &args); err != nil {
-		return "", fmt.Errorf("parse nmap args: %w", err)
+	if err := json.Unmarshal([]byte(toolArgument.Text), &args); err != nil {
+		return nil, fmt.Errorf("parse nmap args: %w", err)
 	}
 
 	if args.Target == "" {
-		return "", fmt.Errorf("nmap: target is required")
+		return nil, fmt.Errorf("nmap: target is required")
 	}
 
 	flags := "-sV -sC"
@@ -63,18 +63,20 @@ func (t *NmapTool) InvokableRun(ctx context.Context, argumentsInJSON string, opt
 
 	cmd := exec.CommandContext(ctx, "nmap", cmdArgs...)
 	output, err := cmd.CombinedOutput()
+
+	result := &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{
+			{
+				Type: schema.ToolPartTypeText,
+				Text: string(output),
+			},
+		},
+	}
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return string(output), fmt.Errorf("nmap: timeout after 5 minutes")
+			return result, fmt.Errorf("nmap: timeout after 5 minutes")
 		}
-		return string(output), fmt.Errorf("nmap: %w", err)
+		return result, fmt.Errorf("nmap: %w", err)
 	}
-
-	result := map[string]interface{}{
-		"tool":   "nmap",
-		"target": args.Target,
-		"output": string(output),
-	}
-	out, _ := json.Marshal(result)
-	return string(out), nil
+	return result, nil
 }

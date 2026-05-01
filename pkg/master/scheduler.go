@@ -2,34 +2,36 @@ package master
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 
-	"github.com/cloudwego/eino-ptes/pkg/protocol"
+	"github.com/cloudwego/eino/schema"
 )
 
 type Scheduler struct {
 	memberMgr   *MemberManager
 	conns       map[string]*WorkerConn
 	mu          sync.RWMutex
-	taskUpdates chan protocol.Task
+	toolWaits   map[string]chan *schema.Message // callID -> result channel
+	callWorkers map[string]string               // callID -> workerID
 }
 
 type WorkerConn struct {
 	WorkerID string
-	Encoder  interface{}
-	Conn     interface{}
+	Encoder  *json.Encoder
 }
 
 func NewScheduler(mm *MemberManager) *Scheduler {
 	return &Scheduler{
-		memberMgr:   mm,
-		conns:       make(map[string]*WorkerConn),
-		taskUpdates: make(chan protocol.Task, 100),
+		memberMgr: mm,
+		conns:     make(map[string]*WorkerConn),
+		toolWaits:   make(map[string]chan *schema.Message),
+		callWorkers: make(map[string]string),
 	}
 }
 
-func (s *Scheduler) RegisterConn(workerID string, encoder interface{}) {
+func (s *Scheduler) RegisterConn(workerID string, encoder *json.Encoder) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.conns[workerID] = &WorkerConn{
@@ -44,39 +46,68 @@ func (s *Scheduler) UnregisterConn(workerID string) {
 	delete(s.conns, workerID)
 }
 
-func (s *Scheduler) Dispatch(ctx context.Context, task *protocol.Task, capability string) (*protocol.WorkerInfo, error) {
-	worker := s.memberMgr.GetIdleWorker(capability)
+func (s *Scheduler) DispatchToolCall(ctx context.Context, msg *schema.Message) (*schema.Message, error) {
+	if msg == nil || len(msg.ToolCalls) == 0 {
+		return nil, fmt.Errorf("no tool calls in message")
+	}
+
+	tc := msg.ToolCalls[0]
+	worker := s.memberMgr.AcquireIdleWorker(tc.Function.Name)
 	if worker == nil {
-		return nil, fmt.Errorf("no idle worker with capability %s", capability)
+		return nil, fmt.Errorf("no idle worker with tool %s", tc.Function.Name)
 	}
 
 	s.mu.RLock()
 	conn, ok := s.conns[worker.ID]
 	s.mu.RUnlock()
 	if !ok {
+		s.memberMgr.ReleaseWorker(worker.ID)
 		return nil, fmt.Errorf("worker %s connection not found", worker.ID)
 	}
 
-	task.WorkerID = worker.ID
-	task.Status = protocol.TaskStatusAssigned
+	resultCh := make(chan *schema.Message, 1)
+	s.mu.Lock()
+	s.toolWaits[tc.ID] = resultCh
+	s.callWorkers[tc.ID] = worker.ID
+	s.mu.Unlock()
 
-	msg := protocol.Message{
-		Type:    protocol.MsgTypeDispatchTask,
-		Payload: task,
+	if err := conn.Encoder.Encode(msg); err != nil {
+		s.mu.Lock()
+		delete(s.toolWaits, tc.ID)
+		delete(s.callWorkers, tc.ID)
+		s.mu.Unlock()
+		s.memberMgr.ReleaseWorker(worker.ID)
+		return nil, fmt.Errorf("dispatch tool call to worker %s: %w", worker.ID, err)
 	}
 
-	if enc, ok := conn.Encoder.(interface{ Encode(v interface{}) error }); ok {
-		if err := enc.Encode(msg); err != nil {
-			return nil, fmt.Errorf("dispatch task to worker %s: %w", worker.ID, err)
-		}
+	select {
+	case result := <-resultCh:
+		return result, nil
+	case <-ctx.Done():
+		s.mu.Lock()
+		delete(s.toolWaits, tc.ID)
+		delete(s.callWorkers, tc.ID)
+		s.mu.Unlock()
+		s.memberMgr.ReleaseWorker(worker.ID)
+		return nil, ctx.Err()
+	}
+}
+
+func (s *Scheduler) OnToolResult(callID string, msg *schema.Message) {
+	s.mu.Lock()
+	ch, ok := s.toolWaits[callID]
+	if ok {
+		delete(s.toolWaits, callID)
+	}
+	workerID := s.callWorkers[callID]
+	delete(s.callWorkers, callID)
+	s.mu.Unlock()
+
+	if workerID != "" {
+		s.memberMgr.ReleaseWorker(workerID)
 	}
 
-	s.memberMgr.mu.Lock()
-	if w, exists := s.memberMgr.workers[worker.ID]; exists {
-		w.Status = protocol.WorkerStatusBusy
-		w.CurrentTask = task.ID
+	if ok {
+		ch <- msg
 	}
-	s.memberMgr.mu.Unlock()
-
-	return worker, nil
 }

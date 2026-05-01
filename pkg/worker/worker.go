@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino-ptes/pkg/protocol"
+	"github.com/cloudwego/eino/schema"
 )
 
 type Config struct {
@@ -27,6 +28,7 @@ type Worker struct {
 	decoder  *json.Decoder
 	executor *Executor
 	stopCh   chan struct{}
+	stopOnce sync.Once
 	wg       sync.WaitGroup
 	mu       sync.RWMutex
 	status   protocol.WorkerStatus
@@ -61,24 +63,27 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	log.Printf("worker %s connected to master at %s", w.config.ID, w.config.MasterAddr)
 
-	<-w.stopCh
+	select {
+	case <-ctx.Done():
+		w.Stop()
+	case <-w.stopCh:
+	}
 	w.wg.Wait()
 	return nil
 }
 
 func (w *Worker) register() error {
-	msg := protocol.Message{
-		Type: protocol.MsgTypeRegister,
-		Payload: protocol.WorkerInfo{
-			ID:            w.config.ID,
-			Name:          w.config.Name,
-			Host:          w.config.ListenAddr,
-			Capabilities:  w.config.Capabilities,
-			Status:        protocol.WorkerStatusIdle,
-			RegisteredAt:  time.Now(),
-			LastHeartbeat: time.Now(),
-		},
+	info := &protocol.WorkerInfo{
+		ID:            w.config.ID,
+		Name:          w.config.Name,
+		Host:          w.config.ListenAddr,
+		Capabilities:  w.config.Capabilities,
+		ToolInfos:     w.executor.GetToolInfos(context.Background()),
+		Status:        protocol.WorkerStatusIdle,
+		RegisteredAt:  time.Now(),
+		LastHeartbeat: time.Now(),
 	}
+	msg := protocol.WorkerRegisterMessage(info)
 	return w.encoder.Encode(msg)
 }
 
@@ -95,7 +100,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			w.mu.RLock()
-			hb := protocol.Heartbeat{
+			hb := &protocol.Heartbeat{
 				WorkerID:    w.config.ID,
 				Status:      w.status,
 				CurrentTask: w.current,
@@ -103,13 +108,10 @@ func (w *Worker) heartbeatLoop(ctx context.Context) {
 			}
 			w.mu.RUnlock()
 
-			msg := protocol.Message{
-				Type:    protocol.MsgTypeHeartbeat,
-				Payload: hb,
-			}
+			msg := protocol.HeartbeatMessage(hb)
 			if err := w.encoder.Encode(msg); err != nil {
 				log.Printf("heartbeat error: %v", err)
-				close(w.stopCh)
+				w.Stop()
 				return
 			}
 		}
@@ -127,42 +129,42 @@ func (w *Worker) handleMessages(ctx context.Context) {
 		default:
 		}
 
-		var msg protocol.Message
+		var msg schema.Message
 		if err := w.decoder.Decode(&msg); err != nil {
 			if err.Error() != "EOF" {
 				log.Printf("decode error: %v", err)
 			}
-			close(w.stopCh)
+			w.Stop()
 			return
 		}
 
-		go w.processMessage(ctx, msg)
+		go w.processMessage(ctx, &msg)
 	}
 }
 
-func (w *Worker) processMessage(ctx context.Context, msg protocol.Message) {
-	switch msg.Type {
-	case protocol.MsgTypeDispatchTask:
-		var task protocol.Task
-		payloadBytes, _ := json.Marshal(msg.Payload)
-		if err := json.Unmarshal(payloadBytes, &task); err != nil {
-			log.Printf("unmarshal task error: %v", err)
-			return
+func (w *Worker) processMessage(ctx context.Context, msg *schema.Message) {
+	if msg.Role == schema.Assistant && len(msg.ToolCalls) > 0 {
+		for _, tc := range msg.ToolCalls {
+			w.handleToolCall(ctx, tc)
 		}
-		w.handleTask(ctx, task)
-	case protocol.MsgTypeCancelTask:
-		var taskID string
-		payloadBytes, _ := json.Marshal(msg.Payload)
-		_ = json.Unmarshal(payloadBytes, &taskID)
-		w.executor.Cancel(taskID)
 	}
 }
 
-func (w *Worker) handleTask(ctx context.Context, task protocol.Task) {
+func (w *Worker) handleToolCall(ctx context.Context, tc schema.ToolCall) {
 	w.mu.Lock()
 	w.status = protocol.WorkerStatusBusy
-	w.current = task.ID
+	w.current = tc.ID
 	w.mu.Unlock()
+
+	var task protocol.Task
+	if err := json.Unmarshal([]byte(tc.Function.Arguments), &task); err != nil {
+		w.reportError(tc.ID, tc.Function.Name, err)
+		w.mu.Lock()
+		w.status = protocol.WorkerStatusIdle
+		w.current = ""
+		w.mu.Unlock()
+		return
+	}
 
 	result, err := w.executor.Execute(ctx, task)
 
@@ -171,28 +173,45 @@ func (w *Worker) handleTask(ctx context.Context, task protocol.Task) {
 	w.current = ""
 	w.mu.Unlock()
 
-	var taskResult protocol.TaskResult
 	if err != nil {
-		taskResult.Error = err.Error()
-	} else {
-		taskResult = *result
+		w.reportError(tc.ID, tc.Function.Name, err)
+		return
 	}
 
-	msg := protocol.Message{
-		Type: protocol.MsgTypeReportResult,
-		Payload: map[string]interface{}{
-			"task_id": task.ID,
-			"result":  taskResult,
-		},
-	}
+	msg := protocol.ReportResultMessage(tc.ID, result)
 	if err := w.encoder.Encode(msg); err != nil {
 		log.Printf("report result error: %v", err)
 	}
 }
 
-func (w *Worker) Stop() {
-	close(w.stopCh)
-	if w.conn != nil {
-		_ = w.conn.Close()
+func (w *Worker) reportError(callID, toolName string, err error) {
+	result := &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{
+			{
+				Type: schema.ToolPartTypeText,
+				Text: err.Error(),
+			},
+		},
 	}
+	msg := &schema.Message{
+		Role:       schema.Tool,
+		Content:    err.Error(),
+		ToolCallID: callID,
+		ToolName:   toolName,
+		Extra: map[string]any{
+			protocol.ExtraKeyToolResult: result,
+		},
+	}
+	if encErr := w.encoder.Encode(msg); encErr != nil {
+		log.Printf("report error message error: %v", encErr)
+	}
+}
+
+func (w *Worker) Stop() {
+	w.stopOnce.Do(func() {
+		close(w.stopCh)
+		if w.conn != nil {
+			_ = w.conn.Close()
+		}
+	})
 }

@@ -7,13 +7,14 @@ import (
 	"sync"
 
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 	"github.com/cloudwego/eino-ptes/pkg/protocol"
 	"github.com/cloudwego/eino-ptes/pkg/worker/tools"
 )
 
 type Executor struct {
 	capabilities []string
-	tools        map[string]tool.InvokableTool
+	tools        map[string]tool.EnhancedInvokableTool
 	cancelMu     sync.RWMutex
 	cancels      map[string]context.CancelFunc
 }
@@ -21,7 +22,7 @@ type Executor struct {
 func NewExecutor(capabilities []string) *Executor {
 	e := &Executor{
 		capabilities: capabilities,
-		tools:        make(map[string]tool.InvokableTool),
+		tools:        make(map[string]tool.EnhancedInvokableTool),
 		cancels:      make(map[string]context.CancelFunc),
 	}
 
@@ -39,7 +40,7 @@ func NewExecutor(capabilities []string) *Executor {
 	return e
 }
 
-func (e *Executor) Execute(ctx context.Context, task protocol.Task) (*protocol.TaskResult, error) {
+func (e *Executor) Execute(ctx context.Context, task protocol.Task) (*schema.ToolResult, error) {
 	taskCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -52,20 +53,19 @@ func (e *Executor) Execute(ctx context.Context, task protocol.Task) (*protocol.T
 		e.cancelMu.Unlock()
 	}()
 
+	var toolName string
 	switch task.Type {
 	case protocol.TaskTypeReconnaissance:
-		return e.executeReconnaissance(taskCtx, task)
+		toolName = "nmap"
 	case protocol.TaskTypeVulnerabilityScan:
-		return e.executeVulnerabilityScan(taskCtx, task)
+		toolName = "nikto"
 	default:
 		return nil, fmt.Errorf("unsupported task type: %s", task.Type)
 	}
-}
 
-func (e *Executor) executeReconnaissance(ctx context.Context, task protocol.Task) (*protocol.TaskResult, error) {
-	t, ok := e.tools["nmap"]
+	t, ok := e.tools[toolName]
 	if !ok {
-		return nil, fmt.Errorf("nmap tool not available")
+		return nil, fmt.Errorf("tool %s not available", toolName)
 	}
 
 	args := map[string]interface{}{
@@ -79,55 +79,15 @@ func (e *Executor) executeReconnaissance(ctx context.Context, task protocol.Task
 
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
-		return nil, fmt.Errorf("marshal nmap args: %w", err)
+		return nil, fmt.Errorf("marshal args: %w", err)
 	}
 
-	output, err := t.InvokableRun(ctx, string(argsJSON))
+	result, err := t.InvokableRun(taskCtx, &schema.ToolArgument{Text: string(argsJSON)})
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 
-	return &protocol.TaskResult{
-		Output: output,
-		Artifacts: map[string]interface{}{
-			"tool":   "nmap",
-			"target": task.Target,
-		},
-	}, nil
-}
-
-func (e *Executor) executeVulnerabilityScan(ctx context.Context, task protocol.Task) (*protocol.TaskResult, error) {
-	t, ok := e.tools["nikto"]
-	if !ok {
-		return nil, fmt.Errorf("nikto tool not available")
-	}
-
-	args := map[string]interface{}{
-		"target": task.Target,
-	}
-	if task.Params != nil {
-		for k, v := range task.Params {
-			args[k] = v
-		}
-	}
-
-	argsJSON, err := json.Marshal(args)
-	if err != nil {
-		return nil, fmt.Errorf("marshal nikto args: %w", err)
-	}
-
-	output, err := t.InvokableRun(ctx, string(argsJSON))
-	if err != nil {
-		return nil, err
-	}
-
-	return &protocol.TaskResult{
-		Output: output,
-		Artifacts: map[string]interface{}{
-			"tool":   "nikto",
-			"target": task.Target,
-		},
-	}, nil
+	return result, nil
 }
 
 func (e *Executor) Cancel(taskID string) {
@@ -137,4 +97,16 @@ func (e *Executor) Cancel(taskID string) {
 	if ok {
 		cancel()
 	}
+}
+
+func (e *Executor) GetToolInfos(ctx context.Context) []*schema.ToolInfo {
+	var infos []*schema.ToolInfo
+	for _, t := range e.tools {
+		info, err := t.Info(ctx)
+		if err != nil {
+			continue
+		}
+		infos = append(infos, info)
+	}
+	return infos
 }
