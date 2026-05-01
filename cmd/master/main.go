@@ -33,7 +33,7 @@ func main() {
 			APIKey:  *modelAPIKey,
 			BaseURL: *modelBaseURL,
 			Model:   *modelName,
-			Timeout: 0,
+			Timeout: 30,
 		}
 		cm, err := openaiModel.NewChatModel(context.Background(), cfg)
 		if err != nil {
