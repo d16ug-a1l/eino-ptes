@@ -6,12 +6,14 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/cloudwego/eino-ptes/pkg/protocol"
 	"github.com/cloudwego/eino/schema"
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/ssh"
 )
 
 type Server struct {
@@ -20,6 +22,7 @@ type Server struct {
 	memberMgr    *MemberManager
 	scheduler    *Scheduler
 	orchestrator *Orchestrator
+	sshMgr       *SSHManager
 	upgrader     websocket.Upgrader
 	wsClients    map[*websocket.Conn]bool
 	wsWriteMu    map[*websocket.Conn]*sync.Mutex
@@ -37,6 +40,7 @@ func NewServer(addr, tcpAddr string, mm *MemberManager, sched *Scheduler, orch *
 		memberMgr:    mm,
 		scheduler:    sched,
 		orchestrator: orch,
+		sshMgr:       NewSSHManager(),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -47,6 +51,7 @@ func NewServer(addr, tcpAddr string, mm *MemberManager, sched *Scheduler, orch *
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
+	mux.HandleFunc("/ws/ssh/", s.handleSSHWebSocket)
 	mux.HandleFunc("/api/workers", s.handleWorkers)
 	mux.HandleFunc("/api/tasks", s.handleTasks)
 	mux.HandleFunc("/api/tasks/", s.handleTaskDetail)
@@ -285,7 +290,21 @@ func (s *Server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	id := r.URL.Path[len("/api/tasks/"):]
+	path := r.URL.Path[len("/api/tasks/"):]
+	parts := strings.Split(path, "/")
+	id := parts[0]
+
+	if len(parts) > 1 && parts[1] == "graph" {
+		tg := s.orchestrator.GetTaskGraph(id)
+		if tg == nil {
+			http.Error(w, "graph not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(tg)
+		return
+	}
+
 	task := s.orchestrator.taskStore.Get(id)
 	if task == nil {
 		http.Error(w, "task not found", http.StatusNotFound)
@@ -293,6 +312,116 @@ func (s *Server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(task)
+}
+
+func (s *Server) handleSSHWebSocket(w http.ResponseWriter, r *http.Request) {
+	workerID := r.URL.Path[len("/ws/ssh/"):]
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("ssh websocket upgrade error: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	// 等待前端发送连接配置
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		log.Printf("ssh websocket read config error: %v", err)
+		return
+	}
+
+	var cfg struct {
+		User       string `json:"user"`
+		Password   string `json:"password"`
+		PrivateKey string `json:"private_key"`
+		Port       int    `json:"port"`
+	}
+	if err := json.Unmarshal(msg, &cfg); err != nil {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("配置解析失败: "+err.Error()))
+		return
+	}
+
+	worker := s.memberMgr.GetWorker(workerID)
+	if worker == nil {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("worker 不存在"))
+		return
+	}
+
+	if cfg.Port == 0 {
+		cfg.Port = 22
+	}
+	if cfg.User == "" {
+		cfg.User = worker.SSHUser
+	}
+	if cfg.User == "" {
+		cfg.User = "root"
+	}
+
+	var auth ssh.AuthMethod
+	if cfg.PrivateKey != "" {
+		signer, err := ssh.ParsePrivateKey([]byte(cfg.PrivateKey))
+		if err != nil {
+			_ = conn.WriteMessage(websocket.TextMessage, []byte("私钥解析失败: "+err.Error()))
+			return
+		}
+		auth = ssh.PublicKeys(signer)
+	} else {
+		auth = ssh.Password(cfg.Password)
+	}
+
+	if err := s.sshMgr.Connect(workerID, worker.Host, cfg.Port, cfg.User, auth); err != nil {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("SSH 连接失败: "+err.Error()))
+		return
+	}
+	defer s.sshMgr.Disconnect(workerID)
+
+	sess, err := s.sshMgr.NewSession(workerID)
+	if err != nil {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("SSH 会话失败: "+err.Error()))
+		return
+	}
+	defer sess.Close()
+
+	_ = conn.WriteMessage(websocket.TextMessage, []byte("\r\n=== SSH 连接成功 ===\r\n"))
+
+	// stdout -> WebSocket
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := sess.Stdout.Read(buf)
+			if n > 0 {
+				_ = conn.WriteMessage(websocket.BinaryMessage, buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// stderr -> WebSocket
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := sess.Stderr.Read(buf)
+			if n > 0 {
+				_ = conn.WriteMessage(websocket.BinaryMessage, buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// WebSocket -> stdin
+	for {
+		mt, msg, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		if mt == websocket.TextMessage || mt == websocket.BinaryMessage {
+			_, _ = sess.Stdin.Write(msg)
+		}
+	}
 }
 
 func (s *Server) Stop() {

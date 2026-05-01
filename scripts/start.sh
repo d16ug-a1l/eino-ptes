@@ -6,7 +6,7 @@ cd "$PROJECT_DIR"
 
 echo "=== Checking for residual processes ==="
 for bin in master worker; do
-    pids=$(pgrep -f "eino-ptes/bin/$bin" || true)
+    pids=$(pgrep -f "\./bin/$bin" || true)
     if [ -n "$pids" ]; then
         echo "Killing residual $bin: $pids"
         kill $pids 2>/dev/null || true
@@ -21,7 +21,17 @@ go build -o bin/worker ./cmd/worker
 echo "Build complete"
 
 echo "=== Starting Master ==="
-nohup ./bin/master -http=:9090 -tcp=:9091 > /tmp/eino-ptes-master.log 2>&1 &
+MASTER_OPTS="-http=:9090 -tcp=:9091"
+if [ -n "$MODEL_API_KEY" ]; then
+    MASTER_OPTS="$MASTER_OPTS -model-key=$MODEL_API_KEY"
+fi
+if [ -n "$MODEL_BASE_URL" ]; then
+    MASTER_OPTS="$MASTER_OPTS -model-url=$MODEL_BASE_URL"
+fi
+if [ -n "$MODEL_NAME" ]; then
+    MASTER_OPTS="$MASTER_OPTS -model=$MODEL_NAME"
+fi
+nohup ./bin/master $MASTER_OPTS > /tmp/eino-ptes-master.log 2>&1 &
 MASTER_PID=$!
 echo "Master PID: $MASTER_PID"
 

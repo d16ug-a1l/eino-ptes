@@ -13,15 +13,33 @@ import (
 
 func main() {
 	var (
-		httpAddr = flag.String("http", ":8080", "http server address")
-		tcpAddr  = flag.String("tcp", ":8081", "tcp server address for workers")
+		httpAddr    = flag.String("http", ":8080", "http server address")
+		tcpAddr     = flag.String("tcp", ":8081", "tcp server address for workers")
+		modelAPIKey = flag.String("model-key", os.Getenv("MODEL_API_KEY"), "LLM API key (or env MODEL_API_KEY)")
+		modelBaseURL = flag.String("model-url", os.Getenv("MODEL_BASE_URL"), "LLM base URL (or env MODEL_BASE_URL)")
+		modelName   = flag.String("model", os.Getenv("MODEL_NAME"), "LLM model name (or env MODEL_NAME)")
 	)
 	flag.Parse()
 
 	mm := master.NewMemberManager()
 	sched := master.NewScheduler(mm)
 	gs := master.NewGraphState()
-	orch := master.NewOrchestrator(sched, mm, gs)
+
+	var analyzer master.ScanAnalyzer
+	if *modelAPIKey != "" && *modelName != "" {
+		cfg := &master.OpenAIConfig{
+			APIKey:  *modelAPIKey,
+			BaseURL: *modelBaseURL,
+			Model:   *modelName,
+		}
+		chatModel := master.NewOpenAIChatModel(cfg)
+		analyzer = master.NewLLMScanAnalyzer(chatModel)
+		log.Printf("LLM analyzer enabled: model=%s, baseURL=%s", *modelName, *modelBaseURL)
+	} else {
+		log.Println("LLM analyzer disabled: set -model-key and -model (or env vars) to enable")
+	}
+
+	orch := master.NewOrchestrator(sched, mm, gs, analyzer)
 
 	server := master.NewServer(*httpAddr, *tcpAddr, mm, sched, orch)
 	gs.SetServer(server)

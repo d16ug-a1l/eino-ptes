@@ -15,10 +15,11 @@ import (
 
 // PTESState is the state object passed through the Eino Graph nodes.
 type PTESState struct {
-	TaskID  string
-	Target  string
-	Params  map[string]interface{}
-	Results map[protocol.TaskType]*schema.ToolResult
+	TaskID    string
+	Target    string
+	Params    map[string]interface{}
+	Results   map[protocol.TaskType]*schema.ToolResult
+	Analysis  map[string]*ScanAnalysis
 }
 
 type Orchestrator struct {
@@ -26,6 +27,7 @@ type Orchestrator struct {
 	memberMgr     *MemberManager
 	graphState    GraphStateManager
 	taskStore     *TaskStore
+	analyzer      ScanAnalyzer
 	mu            sync.RWMutex
 	runningTasks  map[string]context.CancelFunc
 	compiledGraph compose.Runnable[*PTESState, *PTESState]
@@ -77,12 +79,16 @@ func (ts *TaskStore) List() []*protocol.Task {
 	return result
 }
 
-func NewOrchestrator(scheduler *Scheduler, memberMgr *MemberManager, graphState GraphStateManager) *Orchestrator {
+func NewOrchestrator(scheduler *Scheduler, memberMgr *MemberManager, graphState GraphStateManager, analyzer ScanAnalyzer) *Orchestrator {
+	if analyzer == nil {
+		analyzer = NoopScanAnalyzer{}
+	}
 	o := &Orchestrator{
 		scheduler:    scheduler,
 		memberMgr:    memberMgr,
 		graphState:   graphState,
 		taskStore:    NewTaskStore(),
+		analyzer:     analyzer,
 		runningTasks: make(map[string]context.CancelFunc),
 	}
 	return o
@@ -142,6 +148,10 @@ func (o *Orchestrator) buildGraph() (*compose.Graph[*PTESState, *PTESState], err
 }
 
 func (o *Orchestrator) reconNode(ctx context.Context, state *PTESState) (*PTESState, error) {
+	if o.graphState != nil {
+		o.graphState.UpdateNode(state.TaskID, "reconnaissance", protocol.GraphNodeStateRunning, nil, "")
+	}
+
 	task := &protocol.Task{
 		ID:     state.TaskID,
 		Type:   protocol.TaskTypeReconnaissance,
@@ -149,11 +159,44 @@ func (o *Orchestrator) reconNode(ctx context.Context, state *PTESState) (*PTESSt
 		Params: state.Params,
 	}
 	result, err := o.dispatchAndWait(ctx, task, "nmap")
+
+	if o.graphState != nil {
+		if err != nil {
+			o.graphState.UpdateNode(state.TaskID, "reconnaissance", protocol.GraphNodeStateFailed, nil, err.Error())
+		} else {
+			var output string
+			if result != nil {
+				for _, p := range result.Parts {
+					if p.Type == schema.ToolPartTypeText {
+						output = p.Text
+						break
+					}
+				}
+			}
+			o.graphState.UpdateNode(state.TaskID, "reconnaissance", protocol.GraphNodeStateSuccess, output, "")
+		}
+	}
+
 	state.Results[protocol.TaskTypeReconnaissance] = result
+
+	// LLM analysis
+	if raw := extractTextFromResult(result); raw != "" && o.analyzer != nil {
+		if analysis, aerr := o.analyzer.Analyze(ctx, "reconnaissance", raw); aerr == nil {
+			if state.Analysis == nil {
+				state.Analysis = make(map[string]*ScanAnalysis)
+			}
+			state.Analysis["reconnaissance"] = analysis
+		}
+	}
+
 	return state, err
 }
 
 func (o *Orchestrator) vulnScanNode(ctx context.Context, state *PTESState) (*PTESState, error) {
+	if o.graphState != nil {
+		o.graphState.UpdateNode(state.TaskID, "vulnerability_scan", protocol.GraphNodeStateRunning, nil, "")
+	}
+
 	task := &protocol.Task{
 		ID:     state.TaskID,
 		Type:   protocol.TaskTypeVulnerabilityScan,
@@ -161,7 +204,36 @@ func (o *Orchestrator) vulnScanNode(ctx context.Context, state *PTESState) (*PTE
 		Params: nil,
 	}
 	result, err := o.dispatchAndWait(ctx, task, "nikto")
+
+	if o.graphState != nil {
+		if err != nil {
+			o.graphState.UpdateNode(state.TaskID, "vulnerability_scan", protocol.GraphNodeStateFailed, nil, err.Error())
+		} else {
+			var output string
+			if result != nil {
+				for _, p := range result.Parts {
+					if p.Type == schema.ToolPartTypeText {
+						output = p.Text
+						break
+					}
+				}
+			}
+			o.graphState.UpdateNode(state.TaskID, "vulnerability_scan", protocol.GraphNodeStateSuccess, output, "")
+		}
+	}
+
 	state.Results[protocol.TaskTypeVulnerabilityScan] = result
+
+	// LLM analysis
+	if raw := extractTextFromResult(result); raw != "" && o.analyzer != nil {
+		if analysis, aerr := o.analyzer.Analyze(ctx, "vulnerability_scan", raw); aerr == nil {
+			if state.Analysis == nil {
+				state.Analysis = make(map[string]*ScanAnalysis)
+			}
+			state.Analysis["vulnerability_scan"] = analysis
+		}
+	}
+
 	return state, err
 }
 
@@ -225,10 +297,11 @@ func (o *Orchestrator) ExecuteTask(ctx context.Context, task *protocol.Task) err
 	o.taskStore.Save(task)
 
 	state := &PTESState{
-		TaskID:  task.ID,
-		Target:  task.Target,
-		Params:  task.Params,
-		Results: make(map[protocol.TaskType]*schema.ToolResult),
+		TaskID:   task.ID,
+		Target:   task.Target,
+		Params:   task.Params,
+		Results:  make(map[protocol.TaskType]*schema.ToolResult),
+		Analysis: make(map[string]*ScanAnalysis),
 	}
 
 	var handler callbacks.Handler
@@ -275,7 +348,13 @@ func (o *Orchestrator) ExecuteTask(ctx context.Context, task *protocol.Task) err
 		outputs = append(outputs, entry)
 	}
 
-	aggJSON, _ := json.Marshal(map[string]interface{}{"phases": outputs})
+	agg := map[string]interface{}{
+		"phases": outputs,
+	}
+	if len(finalState.Analysis) > 0 {
+		agg["analysis"] = finalState.Analysis
+	}
+	aggJSON, _ := json.Marshal(agg)
 	task.Result = &schema.ToolResult{
 		Parts: []schema.ToolOutputPart{
 			{Type: schema.ToolPartTypeText, Text: string(aggJSON)},
@@ -330,6 +409,13 @@ func (o *Orchestrator) OnTaskResult(taskID string, result *schema.ToolResult) {
 	}
 }
 
+func (o *Orchestrator) GetTaskGraph(taskID string) *TaskGraph {
+	if gs, ok := o.graphState.(*GraphState); ok {
+		return gs.GetTaskGraph(taskID)
+	}
+	return nil
+}
+
 func (o *Orchestrator) CancelTask(taskID string) error {
 	o.mu.RLock()
 	cancel, ok := o.runningTasks[taskID]
@@ -343,4 +429,16 @@ func (o *Orchestrator) CancelTask(taskID string) error {
 
 func generateTaskID() string {
 	return fmt.Sprintf("task-%d", time.Now().UnixNano())
+}
+
+func extractTextFromResult(result *schema.ToolResult) string {
+	if result == nil {
+		return ""
+	}
+	for _, p := range result.Parts {
+		if p.Type == schema.ToolPartTypeText {
+			return p.Text
+		}
+	}
+	return ""
 }

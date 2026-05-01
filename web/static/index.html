@@ -4,99 +4,682 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Eino-PTES Dashboard</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; }
-        .header { background: #161b22; padding: 16px 24px; border-bottom: 1px solid #30363d; display: flex; align-items: center; justify-content: space-between; }
-        .header h1 { font-size: 20px; color: #58a6ff; }
-        .container { display: flex; height: calc(100vh - 60px); }
-        .sidebar { width: 280px; background: #161b22; border-right: 1px solid #30363d; padding: 16px; overflow-y: auto; }
-        .main { flex: 1; padding: 20px; overflow-y: auto; }
-        .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
-        .panel h2 { font-size: 14px; color: #8b949e; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .worker-card { background: #21262d; border: 1px solid #30363d; border-radius: 6px; padding: 12px; margin-bottom: 8px; }
-        .worker-card .name { font-weight: 600; color: #e6edf3; }
-        .worker-card .status { font-size: 12px; margin-top: 4px; }
-        .status-idle { color: #3fb950; }
-        .status-busy { color: #f0883e; }
-        .status-offline { color: #f85149; }
-        .task-form { display: flex; gap: 8px; flex-wrap: wrap; }
-        .task-form input, .task-form select { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 12px; border-radius: 6px; }
-        .task-form button { background: #238636; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; }
-        .task-form button:hover { background: #2ea043; }
-        .task-list { margin-top: 12px; }
-        .task-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; background: #21262d; border-radius: 6px; margin-bottom: 6px; }
-        .task-item .id { font-family: monospace; font-size: 12px; color: #8b949e; }
-        .task-item .target { font-weight: 500; }
-        .badge { font-size: 11px; padding: 2px 8px; border-radius: 12px; }
-        .badge-pending { background: #6e7681; color: white; }
-        .badge-running { background: #1f6feb; color: white; }
-        .badge-completed { background: #238636; color: white; }
-        .badge-failed { background: #da3633; color: white; }
-        .graph-container { display: flex; flex-direction: column; gap: 12px; }
-        .graph-node { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: #21262d; border: 2px solid #30363d; border-radius: 8px; transition: all 0.3s; }
-        .graph-node.pending { border-color: #6e7681; }
-        .graph-node.running { border-color: #1f6feb; animation: pulse 1.5s infinite; }
-        .graph-node.success { border-color: #238636; }
-        .graph-node.failed { border-color: #da3633; }
-        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(31, 111, 235, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(31, 111, 235, 0); } 100% { box-shadow: 0 0 0 0 rgba(31, 111, 235, 0); } }
-        .node-icon { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; }
-        .node-icon.pending { background: #6e7681; }
-        .node-icon.running { background: #1f6feb; }
-        .node-icon.success { background: #238636; }
-        .node-icon.failed { background: #da3633; }
-        .node-info { flex: 1; }
-        .node-name { font-weight: 600; }
-        .node-meta { font-size: 12px; color: #8b949e; margin-top: 2px; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        .header {
+            background: #161b22;
+            padding: 12px 24px;
+            border-bottom: 1px solid #30363d;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 52px;
+            flex-shrink: 0;
+        }
+        .header h1 { font-size: 18px; color: #58a6ff; }
         .connection-status { display: flex; align-items: center; gap: 6px; font-size: 12px; }
         .dot { width: 8px; height: 8px; border-radius: 50%; }
         .dot.connected { background: #3fb950; }
         .dot.disconnected { background: #f85149; }
+
+        .body-wrap {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            overflow: hidden;
+        }
+        .main-content {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+        .sidebar {
+            width: 280px;
+            background: #161b22;
+            border-right: 1px solid #30363d;
+            padding: 16px;
+            overflow-y: auto;
+            flex-shrink: 0;
+        }
+        .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+        .panel h2 { font-size: 13px; color: #8b949e; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+        .worker-card {
+            background: #21262d;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 8px;
+            font-size: 12px;
+        }
+        .worker-card .name { font-weight: 600; color: #e6edf3; font-size: 13px; }
+        .worker-card .status { margin-top: 4px; }
+        .status-idle { color: #3fb950; }
+        .status-busy { color: #f0883e; }
+        .status-offline { color: #f85149; }
+        .caps { color: #8b949e; margin-top: 3px; font-size: 11px; }
+        .worker-actions {
+            display: flex;
+            gap: 6px;
+            margin-top: 8px;
+        }
+        .worker-actions button {
+            flex: 1;
+            font-size: 11px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            border: 1px solid #30363d;
+            background: #21262d;
+            color: #c9d1d9;
+            cursor: pointer;
+        }
+        .worker-actions button:hover { background: #30363d; }
+        .worker-actions button.primary {
+            background: #1f6feb;
+            border-color: #1f6feb;
+            color: white;
+        }
+        .worker-actions button.primary:hover { background: #388bfd; }
+
+        .main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .top-section {
+            padding: 16px 20px 0;
+            flex-shrink: 0;
+        }
+        .task-form { display: flex; gap: 8px; flex-wrap: wrap; }
+        .task-form input, .task-form select {
+            background: #21262d;
+            border: 1px solid #30363d;
+            color: #c9d1d9;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+        .task-form button {
+            background: #238636;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .task-form button:hover { background: #2ea043; }
+
+        .split-section {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            padding: 16px 20px;
+            gap: 16px;
+        }
+        .task-list-area {
+            width: 360px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .task-list-area h2 {
+            font-size: 13px;
+            color: #8b949e;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .task-scroll {
+            overflow-y: auto;
+            flex: 1;
+        }
+        .task-card {
+            background: #21262d;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+        .task-card:hover { border-color: #58a6ff; }
+        .task-card.active { border-color: #58a6ff; background: #1c2128; }
+        .task-card .header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .task-card .target { font-weight: 500; font-size: 13px; }
+        .task-card .id-line {
+            font-family: monospace;
+            font-size: 11px;
+            color: #8b949e;
+            margin-bottom: 6px;
+        }
+        .task-card .meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 11px;
+            color: #8b949e;
+        }
+        .badge {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-weight: 500;
+        }
+        .badge-pending { background: #6e7681; color: white; }
+        .badge-running { background: #1f6feb; color: white; }
+        .badge-completed { background: #238636; color: white; }
+        .badge-failed { background: #da3633; color: white; }
+
+        .pipeline-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .pipeline-area h2 {
+            font-size: 13px;
+            color: #8b949e;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .pipeline-box {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
+            flex: 1;
+            overflow-y: auto;
+        }
+        .pipeline-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #30363d;
+        }
+        .pipeline-header .title { font-size: 15px; font-weight: 600; }
+        .pipeline-header .subtitle { font-size: 12px; color: #8b949e; margin-top: 2px; }
+
+        .pipeline-flow {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            overflow-x: auto;
+            padding-bottom: 16px;
+        }
+        .pipeline-step {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 140px;
+            flex-shrink: 0;
+        }
+        .step-arrow {
+            color: #484f58;
+            font-size: 20px;
+            margin-top: 24px;
+            flex-shrink: 0;
+        }
+        .step-node {
+            width: 100%;
+            background: #21262d;
+            border: 2px solid #30363d;
+            border-radius: 10px;
+            padding: 14px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            position: relative;
+        }
+        .step-node.pending { border-color: #484f58; }
+        .step-node.running {
+            border-color: #1f6feb;
+            animation: pulse 1.5s infinite;
+        }
+        .step-node.success { border-color: #238636; }
+        .step-node.failed { border-color: #da3633; }
+        .step-node.skipped { border-color: #484f58; border-style: dashed; opacity: 0.6; }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(31, 111, 235, 0.4); }
+            70% { box-shadow: 0 0 0 10px rgba(31, 111, 235, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(31, 111, 235, 0); }
+        }
+        .step-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            margin: 0 auto 8px;
+        }
+        .step-icon.pending { background: #484f58; }
+        .step-icon.running { background: #1f6feb; }
+        .step-icon.success { background: #238636; }
+        .step-icon.failed { background: #da3633; }
+        .step-icon.skipped { background: #484f58; }
+        .step-name { font-size: 13px; font-weight: 600; }
+        .step-state {
+            font-size: 11px;
+            color: #8b949e;
+            margin-top: 4px;
+        }
+        .step-time {
+            font-size: 10px;
+            color: #6e7681;
+            margin-top: 2px;
+        }
+
+        .node-detail {
+            margin-top: 20px;
+            background: #21262d;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 14px;
+            display: none;
+        }
+        .node-detail.show { display: block; }
+        .node-detail-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .node-detail-header .label { font-size: 13px; font-weight: 600; }
+        .node-detail-header .close { cursor: pointer; color: #8b949e; font-size: 16px; }
+        .node-detail-header .close:hover { color: #c9d1d9; }
+        .node-output {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 10px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 11px;
+            line-height: 1.5;
+            color: #c9d1d9;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .node-error {
+            margin-top: 10px;
+            color: #f85149;
+            font-size: 12px;
+        }
+        .analysis-section {
+            margin-top: 10px;
+            padding: 10px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+        }
+        .analysis-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: #58a6ff;
+            margin-bottom: 8px;
+        }
+        .analysis-subtitle {
+            font-size: 11px;
+            font-weight: 600;
+            color: #8b949e;
+            margin-top: 10px;
+            margin-bottom: 4px;
+        }
+        .analysis-summary {
+            font-size: 12px;
+            color: #c9d1d9;
+            line-height: 1.5;
+        }
+        .analysis-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+        }
+        .analysis-table th,
+        .analysis-table td {
+            border: 1px solid #30363d;
+            padding: 4px 6px;
+            text-align: left;
+            color: #c9d1d9;
+        }
+        .analysis-table th {
+            background: #21262d;
+            color: #8b949e;
+        }
+        .analysis-item {
+            font-size: 12px;
+            color: #c9d1d9;
+            margin-bottom: 4px;
+            line-height: 1.4;
+        }
+        .analysis-severity {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 600;
+            margin-right: 6px;
+            text-transform: uppercase;
+        }
+        .sev-critical { background: #da3633; color: #fff; }
+        .sev-high { background: #f85149; color: #fff; }
+        .sev-medium { background: #d29922; color: #000; }
+        .sev-low { background: #3fb950; color: #000; }
+        .sev-info { background: #6e7681; color: #fff; }
+        .analysis-list {
+            margin: 0;
+            padding-left: 18px;
+            font-size: 12px;
+            color: #c9d1d9;
+        }
+        .analysis-list li {
+            margin-bottom: 3px;
+        }
+        .empty-state {
+            color: #8b949e;
+            font-size: 13px;
+            text-align: center;
+            padding: 40px;
+        }
+
+        /* Terminal Panel */
+        .terminal-panel {
+            background: #161b22;
+            border-top: 1px solid #30363d;
+            height: 0;
+            transition: height 0.3s;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .terminal-panel.open { height: 320px; }
+        .terminal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 16px;
+            background: #21262d;
+            border-bottom: 1px solid #30363d;
+            flex-shrink: 0;
+        }
+        .terminal-tabs {
+            display: flex;
+            gap: 4px;
+        }
+        .terminal-tab {
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            background: #30363d;
+            color: #c9d1d9;
+        }
+        .terminal-tab.active { background: #1f6feb; color: white; }
+        .terminal-tab .close-tab {
+            margin-left: 6px;
+            color: #8b949e;
+        }
+        .terminal-tab .close-tab:hover { color: #f85149; }
+        .terminal-actions button {
+            font-size: 11px;
+            padding: 4px 10px;
+            border-radius: 4px;
+            border: 1px solid #30363d;
+            background: #21262d;
+            color: #c9d1d9;
+            cursor: pointer;
+            margin-left: 6px;
+        }
+        .terminal-actions button:hover { background: #30363d; }
+        .terminal-body {
+            flex: 1;
+            padding: 8px;
+            overflow: hidden;
+            position: relative;
+        }
+        .terminal-instance {
+            width: 100%;
+            height: 100%;
+            display: none;
+        }
+        .terminal-instance.active { display: block; }
+
+        /* SSH Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.6);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        .modal-overlay.show { display: flex; }
+        .modal {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 10px;
+            width: 460px;
+            max-width: 90vw;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        .modal-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid #30363d;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .modal-header h3 { font-size: 15px; }
+        .modal-header .close { cursor: pointer; color: #8b949e; font-size: 18px; }
+        .modal-body {
+            padding: 20px;
+        }
+        .form-group { margin-bottom: 14px; }
+        .form-group label {
+            display: block;
+            font-size: 12px;
+            color: #8b949e;
+            margin-bottom: 6px;
+        }
+        .form-group input, .form-group textarea, .form-group select {
+            width: 100%;
+            background: #21262d;
+            border: 1px solid #30363d;
+            color: #c9d1d9;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: inherit;
+        }
+        .form-group textarea {
+            resize: vertical;
+            min-height: 80px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 11px;
+        }
+        .form-row {
+            display: flex;
+            gap: 10px;
+        }
+        .form-row .form-group { flex: 1; }
+        .modal-footer {
+            padding: 14px 20px;
+            border-top: 1px solid #30363d;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+        .modal-footer button {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: 1px solid #30363d;
+            background: #21262d;
+            color: #c9d1d9;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .modal-footer button.primary {
+            background: #1f6feb;
+            border-color: #1f6feb;
+            color: white;
+        }
+        .modal-footer button.primary:hover { background: #388bfd; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>Eino-PTES 渗透测试指挥系统 v0.0.1</h1>
+        <h1>Eino-PTES 渗透测试指挥系统</h1>
         <div class="connection-status">
             <span class="dot disconnected" id="connDot"></span>
             <span id="connText">未连接</span>
         </div>
     </div>
-    <div class="container">
-        <div class="sidebar">
-            <div class="panel">
-                <h2>工作节点</h2>
-                <div id="workers"></div>
-            </div>
-        </div>
-        <div class="main">
-            <div class="panel">
-                <h2>新建任务</h2>
-                <div class="task-form">
-                    <select id="taskType">
-                        <option value="reconnaissance">信息收集</option>
-                        <option value="vulnerability_scan">漏洞扫描</option>
-                    </select>
-                    <input type="text" id="taskTarget" placeholder="目标地址 (如 192.168.1.1)" style="flex:1;min-width:200px;">
-                    <button onclick="createTask()">执行任务</button>
+    <div class="body-wrap">
+        <div class="main-content">
+            <div class="sidebar">
+                <div class="panel">
+                    <h2>工作节点</h2>
+                    <div id="workers"></div>
                 </div>
             </div>
-            <div class="panel">
-                <h2>任务列表</h2>
-                <div class="task-list" id="tasks"></div>
+            <div class="main">
+                <div class="top-section">
+                    <div class="panel" style="margin-bottom: 0;">
+                        <h2>新建任务</h2>
+                        <div class="task-form">
+                            <select id="taskType">
+                                <option value="reconnaissance">信息收集</option>
+                                <option value="vulnerability_scan">漏洞扫描</option>
+                            </select>
+                            <input type="text" id="taskTarget" placeholder="目标地址 (如 192.168.1.100)" style="flex:1;min-width:200px;">
+                            <button onclick="createTask()">执行任务</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="split-section">
+                    <div class="task-list-area">
+                        <h2>任务列表</h2>
+                        <div class="task-scroll" id="tasks"></div>
+                    </div>
+                    <div class="pipeline-area">
+                        <h2>执行流程</h2>
+                        <div class="pipeline-box" id="pipelineBox">
+                            <div class="empty-state">点击左侧任务查看执行流程</div>
+                        </div>
+                    </div>
+                </div>
             </div>
-            <div class="panel">
-                <h2>执行图谱</h2>
-                <div class="graph-container" id="graph"></div>
+        </div>
+        <div class="terminal-panel" id="terminalPanel">
+            <div class="terminal-header">
+                <div class="terminal-tabs" id="terminalTabs"></div>
+                <div class="terminal-actions">
+                    <button onclick="toggleTerminalPanel()">收起/展开</button>
+                </div>
+            </div>
+            <div class="terminal-body" id="terminalBody"></div>
+        </div>
+    </div>
+
+    <!-- SSH Modal -->
+    <div class="modal-overlay" id="sshModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>SSH 连接配置</h3>
+                <span class="close" onclick="closeSSHModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>目标节点</label>
+                    <input type="text" id="sshWorkerName" readonly>
+                    <input type="hidden" id="sshWorkerId">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>用户名</label>
+                        <input type="text" id="sshUser" placeholder="root">
+                    </div>
+                    <div class="form-group">
+                        <label>SSH 端口</label>
+                        <input type="number" id="sshPort" value="22">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>认证方式</label>
+                    <select id="sshAuthType" onchange="onAuthTypeChange()">
+                        <option value="password">密码</option>
+                        <option value="key">私钥</option>
+                    </select>
+                </div>
+                <div class="form-group" id="sshPasswordGroup">
+                    <label>密码</label>
+                    <input type="password" id="sshPassword" placeholder="输入密码">
+                </div>
+                <div class="form-group" id="sshKeyGroup" style="display:none">
+                    <label>私钥内容 (PEM 格式)</label>
+                    <textarea id="sshPrivateKey" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeSSHModal()">取消</button>
+                <button class="primary" onclick="connectSSH()">连接</button>
             </div>
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
     <script>
+        const PTES_STEPS = [
+            { key: 'reconnaissance', name: '信息收集', icon: '🔍' },
+            { key: 'vulnerability_scan', name: '漏洞扫描', icon: '🔎' },
+            { key: 'exploitation', name: '渗透利用', icon: '⚡' },
+            { key: 'post_exploitation', name: '后渗透', icon: '🎯' },
+            { key: 'report_generation', name: '报告生成', icon: '📊' }
+        ];
+        const TYPE_NAMES = {
+            'reconnaissance': '信息收集',
+            'vulnerability_scan': '漏洞扫描',
+            'exploitation': '渗透利用',
+            'post_exploitation': '后渗透',
+            'report_generation': '报告生成'
+        };
+
         const ws = new WebSocket('ws://' + location.host + '/ws');
         let workers = [];
         let tasks = [];
-        let graphState = {};
+        let taskGraphs = {};
+        let taskAnalyses = {};
+        let selectedTaskId = null;
+        let expandedNode = null;
+
+        // SSH state
+        let sshSessions = {}; // workerId -> { ws, term, fitAddon, workerName }
+        let activeSshWorkerId = null;
 
         ws.onopen = () => {
             document.getElementById('connDot').className = 'dot connected';
@@ -104,15 +687,13 @@
             fetchWorkers();
             fetchTasks();
         };
-
         ws.onclose = () => {
             document.getElementById('connDot').className = 'dot disconnected';
             document.getElementById('connText').textContent = '已断开';
         };
-
         ws.onmessage = (e) => {
             const data = JSON.parse(e.data);
-            if (data.node_name) {
+            if (data.task_id && data.node_name) {
                 updateGraphNode(data);
             }
         };
@@ -127,8 +708,45 @@
         function fetchTasks() {
             fetch('/api/tasks').then(r => r.json()).then(data => {
                 tasks = data;
+                // Parse LLM analysis from task results
+                tasks.forEach(t => {
+                    if (t.result && t.result.parts && t.result.parts.length > 0) {
+                        const part = t.result.parts[0];
+                        if (part.type === 'text' && part.text) {
+                            try {
+                                const parsed = JSON.parse(part.text);
+                                if (parsed.analysis) {
+                                    taskAnalyses[t.id] = parsed.analysis;
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                });
                 renderTasks();
+                tasks.forEach(t => fetchTaskGraph(t.id));
             });
+        }
+
+        function fetchTaskGraph(taskId) {
+            fetch('/api/tasks/' + taskId + '/graph')
+                .then(r => { if (!r.ok) return null; return r.json(); })
+                .then(graph => {
+                    if (!graph) return;
+                    if (!taskGraphs[taskId]) taskGraphs[taskId] = { nodes: {} };
+                    for (const name in graph.nodes) {
+                        const n = graph.nodes[name];
+                        taskGraphs[taskId].nodes[name] = {
+                            task_id: taskId,
+                            node_name: name,
+                            state: n.state,
+                            output: n.output,
+                            error: n.error,
+                            timestamp: n.end_time || n.start_time
+                        };
+                    }
+                    if (selectedTaskId === taskId) renderPipeline();
+                })
+                .catch(() => {});
         }
 
         function renderWorkers() {
@@ -140,10 +758,15 @@
             el.innerHTML = workers.map(w => {
                 const statusClass = w.status === 'idle' ? 'status-idle' : w.status === 'busy' ? 'status-busy' : 'status-offline';
                 const caps = w.capabilities ? w.capabilities.join(', ') : '';
+                const hasSsh = !!w.ssh_user;
                 return `<div class="worker-card">
-                    <div class="name">${w.name || w.id}</div>
-                    <div class="status ${statusClass}">状态: ${w.status} | 能力: ${caps}</div>
-                    ${w.current_task ? `<div style="font-size:11px;color:#8b949e;margin-top:4px;">任务: ${w.current_task}</div>` : ''}
+                    <div class="name">${escapeHtml(w.name || w.id)}</div>
+                    <div class="status ${statusClass}">状态: ${w.status}</div>
+                    <div class="caps">工具: ${escapeHtml(caps)}</div>
+                    ${w.current_task ? `<div style="color:#8b949e;margin-top:3px;font-size:11px;">任务: ${escapeHtml(w.current_task)}</div>` : ''}
+                    <div class="worker-actions">
+                        <button class="primary" onclick="event.stopPropagation(); openSSHModal('${w.id}', '${escapeHtml(w.name || w.id)}')">SSH 连接</button>
+                    </div>
                 </div>`;
             }).join('');
         }
@@ -151,50 +774,159 @@
         function renderTasks() {
             const el = document.getElementById('tasks');
             if (!tasks.length) {
-                el.innerHTML = '<div style="color:#8b949e;font-size:12px;">暂无任务</div>';
+                el.innerHTML = '<div style="color:#8b949e;font-size:12px;padding:10px;">暂无任务</div>';
                 return;
             }
-            el.innerHTML = tasks.map(t => {
-                const badgeClass = t.status === 'pending' ? 'badge-pending' : t.status === 'running' ? 'badge-running' : t.status === 'completed' ? 'badge-completed' : 'badge-failed';
-                return `<div class="task-item">
-                    <div>
-                        <div class="target">${t.type} → ${t.target}</div>
-                        <div class="id">${t.id} | worker: ${t.worker_id || '未分配'}</div>
+            const sorted = [...tasks].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            el.innerHTML = sorted.map(t => {
+                const badgeClass = t.status === 'pending' ? 'badge-pending'
+                    : t.status === 'running' ? 'badge-running'
+                    : t.status === 'completed' ? 'badge-completed'
+                    : 'badge-failed';
+                const typeName = TYPE_NAMES[t.type] || t.type;
+                const timeStr = t.created_at ? new Date(t.created_at).toLocaleString('zh-CN') : '';
+                return `<div class="task-card ${t.id === selectedTaskId ? 'active' : ''}" onclick="selectTask('${t.id}')">
+                    <div class="header-row">
+                        <span class="target">${escapeHtml(typeName)} → ${escapeHtml(t.target)}</span>
+                        <span class="badge ${badgeClass}">${t.status}</span>
                     </div>
-                    <span class="badge ${badgeClass}">${t.status}</span>
+                    <div class="id-line">${escapeHtml(t.id)}</div>
+                    <div class="meta">
+                        <span>${timeStr}</span>
+                        <span>${t.worker_id || '未分配'}</span>
+                    </div>
                 </div>`;
             }).join('');
         }
 
-        function updateGraphNode(update) {
-            if (!graphState[update.task_id]) {
-                graphState[update.task_id] = { nodes: {} };
-            }
-            graphState[update.task_id].nodes[update.node_name] = update;
-            renderGraph();
+        function selectTask(taskId) {
+            selectedTaskId = taskId;
+            expandedNode = null;
+            renderTasks();
+            renderPipeline();
         }
 
-        function renderGraph() {
-            const el = document.getElementById('graph');
-            let html = '';
-            for (const taskId in graphState) {
-                const gs = graphState[taskId];
-                for (const nodeName in gs.nodes) {
-                    const node = gs.nodes[nodeName];
-                    const state = node.state || 'pending';
-                    html += `<div class="graph-node ${state}">
-                        <div class="node-icon ${state}">${state === 'success' ? '✓' : state === 'failed' ? '✗' : state === 'running' ? '◉' : '○'}</div>
-                        <div class="node-info">
-                            <div class="node-name">${nodeName || '任务节点'}</div>
-                            <div class="node-meta">${taskId} | ${state}</div>
-                        </div>
-                    </div>`;
+        function renderPipeline() {
+            const box = document.getElementById('pipelineBox');
+            if (!selectedTaskId) {
+                box.innerHTML = '<div class="empty-state">点击左侧任务查看执行流程</div>';
+                return;
+            }
+            const task = tasks.find(t => t.id === selectedTaskId);
+            if (!task) {
+                box.innerHTML = '<div class="empty-state">任务不存在</div>';
+                return;
+            }
+            const graph = taskGraphs[selectedTaskId] || { nodes: {} };
+
+            let html = '<div class="pipeline-header">';
+            html += `<div><div class="title">${escapeHtml(TYPE_NAMES[task.type] || task.type)} → ${escapeHtml(task.target)}</div>`;
+            html += `<div class="subtitle">${escapeHtml(task.id)} | ${task.status}</div></div>`;
+            html += `<span class="badge ${task.status === 'pending' ? 'badge-pending' : task.status === 'running' ? 'badge-running' : task.status === 'completed' ? 'badge-completed' : 'badge-failed'}">${task.status}</span>`;
+            html += '</div>';
+
+            html += '<div class="pipeline-flow">';
+            PTES_STEPS.forEach((step, idx) => {
+                const node = graph.nodes[step.key];
+                const state = node ? node.state : 'pending';
+                const timeStr = node && node.timestamp ? new Date(node.timestamp).toLocaleTimeString('zh-CN') : '';
+
+                html += `<div class="pipeline-step">`;
+                html += `<div class="step-node ${state}" onclick="toggleNode('${step.key}')">`;
+                html += `<div class="step-icon ${state}">${state === 'success' ? '✓' : state === 'failed' ? '✗' : state === 'running' ? '◉' : state === 'skipped' ? '⊘' : '○'}</div>`;
+                html += `<div class="step-name">${escapeHtml(step.name)}</div>`;
+                html += `<div class="step-state">${state}</div>`;
+                if (timeStr) html += `<div class="step-time">${timeStr}</div>`;
+                html += `</div>`;
+
+                if (idx < PTES_STEPS.length - 1) {
+                    html += `<div class="step-arrow">→</div>`;
                 }
+                html += `</div>`;
+            });
+            html += '</div>';
+
+            if (expandedNode) {
+                const node = graph.nodes[expandedNode];
+                const step = PTES_STEPS.find(s => s.key === expandedNode);
+                html += `<div class="node-detail show">`;
+                html += `<div class="node-detail-header">`;
+                html += `<span class="label">${escapeHtml(step ? step.name : expandedNode)}</span>`;
+                html += `<span class="close" onclick="toggleNode('${expandedNode}')">✕</span>`;
+                html += `</div>`;
+                if (node && node.error) {
+                    html += `<div class="node-error">错误: ${escapeHtml(node.error)}</div>`;
+                }
+
+                // LLM Analysis
+                const analysis = taskAnalyses[selectedTaskId] ? taskAnalyses[selectedTaskId][expandedNode] : null;
+                if (analysis) {
+                    html += `<div class="analysis-section">`;
+                    html += `<div class="analysis-title">AI 分析摘要</div>`;
+                    if (analysis.summary) {
+                        html += `<div class="analysis-summary">${escapeHtml(analysis.summary)}</div>`;
+                    }
+                    if (analysis.open_ports && analysis.open_ports.length > 0) {
+                        html += `<div class="analysis-subtitle">开放端口</div>`;
+                        html += `<table class="analysis-table"><thead><tr><th>端口</th><th>协议</th><th>服务</th><th>版本</th></tr></thead><tbody>`;
+                        analysis.open_ports.forEach(p => {
+                            html += `<tr><td>${p.port}</td><td>${escapeHtml(p.protocol || '')}</td><td>${escapeHtml(p.service || '')}</td><td>${escapeHtml(p.version || '')}</td></tr>`;
+                        });
+                        html += `</tbody></table>`;
+                    }
+                    if (analysis.vulnerabilities && analysis.vulnerabilities.length > 0) {
+                        html += `<div class="analysis-subtitle">漏洞发现</div>`;
+                        analysis.vulnerabilities.forEach(v => {
+                            const sevClass = 'sev-' + (v.severity || 'info');
+                            html += `<div class="analysis-item"><span class="analysis-severity ${sevClass}">${escapeHtml(v.severity || 'info')}</span> <strong>${escapeHtml(v.name || '')}</strong>: ${escapeHtml(v.description || '')}</div>`;
+                        });
+                    }
+                    if (analysis.risks && analysis.risks.length > 0) {
+                        html += `<div class="analysis-subtitle">风险识别</div>`;
+                        analysis.risks.forEach(r => {
+                            const levelClass = 'sev-' + (r.level || 'info');
+                            html += `<div class="analysis-item"><span class="analysis-severity ${levelClass}">${escapeHtml(r.level || '')}</span> ${escapeHtml(r.description || '')}</div>`;
+                        });
+                    }
+                    if (analysis.recommendations && analysis.recommendations.length > 0) {
+                        html += `<div class="analysis-subtitle">建议</div>`;
+                        html += `<ul class="analysis-list">`;
+                        analysis.recommendations.forEach(rec => {
+                            html += `<li>${escapeHtml(rec)}</li>`;
+                        });
+                        html += `</ul>`;
+                    }
+                    html += `</div>`;
+                }
+
+                if (node && node.output) {
+                    html += `<div class="analysis-title">原始输出</div>`;
+                    const text = typeof node.output === 'string' ? node.output : JSON.stringify(node.output, null, 2);
+                    html += `<div class="node-output">${escapeHtml(text)}</div>`;
+                } else {
+                    html += `<div class="node-output" style="color:#6e7681;">暂无输出</div>`;
+                }
+                html += `</div>`;
             }
-            if (!html) {
-                html = '<div style="color:#8b949e;font-size:12px;">等待任务执行...</div>';
+
+            box.innerHTML = html;
+        }
+
+        function toggleNode(nodeKey) {
+            if (expandedNode === nodeKey) {
+                expandedNode = null;
+            } else {
+                expandedNode = nodeKey;
             }
-            el.innerHTML = html;
+            renderPipeline();
+        }
+
+        function updateGraphNode(data) {
+            const tid = data.task_id;
+            if (!taskGraphs[tid]) taskGraphs[tid] = { nodes: {} };
+            taskGraphs[tid].nodes[data.node_name] = data;
+            if (selectedTaskId === tid) renderPipeline();
+            fetchTasks();
         }
 
         function createTask() {
@@ -208,17 +940,227 @@
                 body: JSON.stringify({ type, target })
             }).then(r => r.json()).then(data => {
                 document.getElementById('taskTarget').value = '';
+                selectedTaskId = data.id;
+                expandedNode = null;
+                taskGraphs[data.id] = { nodes: {} };
+                if (type === 'reconnaissance') {
+                    taskGraphs[data.id].nodes['reconnaissance'] = { task_id: data.id, node_name: 'reconnaissance', state: 'pending' };
+                }
                 fetchTasks();
-                updateGraphNode({ task_id: data.id, node_name: data.type, state: 'pending' });
             });
         }
+
+        function escapeHtml(text) {
+            if (text == null) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // ========== SSH Terminal Functions ==========
+
+        function openSSHModal(workerId, workerName) {
+            document.getElementById('sshWorkerId').value = workerId;
+            document.getElementById('sshWorkerName').value = workerName;
+            document.getElementById('sshUser').value = '';
+            document.getElementById('sshPassword').value = '';
+            document.getElementById('sshPrivateKey').value = '';
+            document.getElementById('sshPort').value = '22';
+            document.getElementById('sshAuthType').value = 'password';
+            onAuthTypeChange();
+            document.getElementById('sshModal').classList.add('show');
+        }
+
+        function closeSSHModal() {
+            document.getElementById('sshModal').classList.remove('show');
+        }
+
+        function onAuthTypeChange() {
+            const type = document.getElementById('sshAuthType').value;
+            document.getElementById('sshPasswordGroup').style.display = type === 'password' ? 'block' : 'none';
+            document.getElementById('sshKeyGroup').style.display = type === 'key' ? 'block' : 'none';
+        }
+
+        function connectSSH() {
+            const workerId = document.getElementById('sshWorkerId').value;
+            const workerName = document.getElementById('sshWorkerName').value;
+            const user = document.getElementById('sshUser').value || 'root';
+            const port = parseInt(document.getElementById('sshPort').value) || 22;
+            const authType = document.getElementById('sshAuthType').value;
+            const password = document.getElementById('sshPassword').value;
+            const privateKey = document.getElementById('sshPrivateKey').value;
+
+            closeSSHModal();
+
+            if (sshSessions[workerId]) {
+                disconnectSSH(workerId);
+            }
+
+            const wsUrl = 'ws://' + location.host + '/ws/ssh/' + workerId;
+            const sshWs = new WebSocket(wsUrl);
+
+            sshSessions[workerId] = { ws: sshWs, workerName: workerName, ready: false };
+
+            sshWs.onopen = () => {
+                const cfg = { user, port, password: authType === 'password' ? password : '', private_key: authType === 'key' ? privateKey : '' };
+                sshWs.send(JSON.stringify(cfg));
+            };
+
+            sshWs.onmessage = (e) => {
+                const sess = sshSessions[workerId];
+                if (!sess) return;
+
+                if (!sess.ready) {
+                    // 第一条消息表示连接状态
+                    sess.ready = true;
+                    createTerminal(workerId, workerName);
+                }
+
+                if (sess.term) {
+                    if (typeof e.data === 'string') {
+                        sess.term.write(e.data);
+                    } else {
+                        const reader = new FileReader();
+                        reader.onload = () => sess.term.write(reader.result);
+                        reader.readAsText(e.data);
+                    }
+                }
+            };
+
+            sshWs.onclose = () => {
+                const sess = sshSessions[workerId];
+                if (sess && sess.term) {
+                    sess.term.write('\r\n\r\n[连接已关闭]\r\n');
+                }
+            };
+
+            sshWs.onerror = (e) => {
+                alert('SSH WebSocket 错误');
+                disconnectSSH(workerId);
+            };
+        }
+
+        function createTerminal(workerId, workerName) {
+            const sess = sshSessions[workerId];
+            if (!sess) return;
+
+            // 创建 tab
+            const tabsEl = document.getElementById('terminalTabs');
+            const tab = document.createElement('div');
+            tab.className = 'terminal-tab active';
+            tab.id = 'tab-' + workerId;
+            tab.innerHTML = `${escapeHtml(workerName)}<span class="close-tab" onclick="event.stopPropagation(); disconnectSSH('${workerId}')">×</span>`;
+            tab.onclick = () => switchTerminal(workerId);
+            tabsEl.appendChild(tab);
+
+            // 创建 terminal div
+            const bodyEl = document.getElementById('terminalBody');
+            const termDiv = document.createElement('div');
+            termDiv.className = 'terminal-instance active';
+            termDiv.id = 'term-' + workerId;
+            bodyEl.appendChild(termDiv);
+
+            // 创建 xterm
+            const term = new Terminal({
+                cursorBlink: true,
+                fontSize: 13,
+                fontFamily: "'SF Mono', Monaco, 'Courier New', monospace",
+                theme: {
+                    background: '#0d1117',
+                    foreground: '#c9d1d9',
+                    cursor: '#c9d1d9',
+                    selectionBackground: '#264f78'
+                }
+            });
+            const fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+            term.open(termDiv);
+            fitAddon.fit();
+
+            term.onData(data => {
+                if (sess.ws && sess.ws.readyState === WebSocket.OPEN) {
+                    sess.ws.send(data);
+                }
+            });
+
+            sess.term = term;
+            sess.fitAddon = fitAddon;
+            sess.tabEl = tab;
+            sess.divEl = termDiv;
+
+            switchTerminal(workerId);
+            showTerminalPanel();
+
+            // 窗口大小变化时调整
+            setTimeout(() => fitAddon.fit(), 100);
+        }
+
+        function switchTerminal(workerId) {
+            activeSshWorkerId = workerId;
+            for (const wid in sshSessions) {
+                const sess = sshSessions[wid];
+                if (sess.tabEl) sess.tabEl.classList.toggle('active', wid === workerId);
+                if (sess.divEl) sess.divEl.classList.toggle('active', wid === workerId);
+            }
+        }
+
+        function disconnectSSH(workerId) {
+            const sess = sshSessions[workerId];
+            if (!sess) return;
+
+            if (sess.ws) {
+                sess.ws.close();
+            }
+            if (sess.term) {
+                sess.term.dispose();
+            }
+            if (sess.tabEl) {
+                sess.tabEl.remove();
+            }
+            if (sess.divEl) {
+                sess.divEl.remove();
+            }
+
+            delete sshSessions[workerId];
+
+            // 切换到另一个活跃的终端
+            const remaining = Object.keys(sshSessions);
+            if (remaining.length > 0) {
+                switchTerminal(remaining[0]);
+            } else {
+                activeSshWorkerId = null;
+                hideTerminalPanel();
+            }
+        }
+
+        function showTerminalPanel() {
+            document.getElementById('terminalPanel').classList.add('open');
+        }
+
+        function hideTerminalPanel() {
+            document.getElementById('terminalPanel').classList.remove('open');
+        }
+
+        function toggleTerminalPanel() {
+            document.getElementById('terminalPanel').classList.toggle('open');
+        }
+
+        window.addEventListener('resize', () => {
+            for (const wid in sshSessions) {
+                const sess = sshSessions[wid];
+                if (sess.fitAddon) {
+                    sess.fitAddon.fit();
+                }
+            }
+        });
 
         setInterval(() => {
             fetchWorkers();
             fetchTasks();
         }, 3000);
 
-        renderGraph();
+        renderWorkers();
+        renderTasks();
     </script>
 </body>
 </html>
