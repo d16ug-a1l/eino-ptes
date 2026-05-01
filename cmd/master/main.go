@@ -54,7 +54,14 @@ func main() {
 		planner = master.NewLLMPlanner(chatModel)
 	}
 
-	orch := master.NewOrchestrator(sched, mm, gs, analyzer, planner)
+	var tcm model.ToolCallingChatModel
+	if chatModel != nil {
+		if m, ok := chatModel.(model.ToolCallingChatModel); ok {
+			tcm = m
+		}
+	}
+
+	orch := master.NewOrchestrator(sched, mm, gs, analyzer, planner, tcm)
 	orch.SetToolProvider(func() []tool.BaseTool {
 		return remote.RemoteToolSet(sched, mm)
 	})

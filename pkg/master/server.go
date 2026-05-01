@@ -3,6 +3,7 @@ package master
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -293,7 +294,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 				task.Target = plan.Target
 				s.orchestrator.taskStore.Save(task)
 
-				if err := s.orchestrator.ExecuteTaskWithPlan(context.Background(), task, plan); err != nil {
+				if err := s.orchestrator.RunTask(context.Background(), task, desc); err != nil {
 					log.Printf("execute task with plan %s error: %v", task.ID, err)
 				}
 			}()
@@ -312,7 +313,8 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		}
 
 		go func() {
-			if err := s.orchestrator.ExecuteTask(context.Background(), task); err != nil {
+			desc := fmt.Sprintf("Perform %s on %s", req.Type, req.Target)
+			if err := s.orchestrator.RunTask(context.Background(), task, desc); err != nil {
 				log.Printf("execute task %s error: %v", task.ID, err)
 			}
 		}()

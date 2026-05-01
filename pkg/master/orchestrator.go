@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino-ptes/pkg/protocol"
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
@@ -24,17 +26,18 @@ type PTESState struct {
 }
 
 type Orchestrator struct {
-	scheduler     *Scheduler
-	memberMgr     *MemberManager
-	graphState    GraphStateManager
-	taskStore     *TaskStore
-	analyzer      ScanAnalyzer
-	planner       Planner
-	toolProvider  func() []tool.BaseTool
-	toolSet       map[string]tool.EnhancedInvokableTool
-	mu            sync.RWMutex
-	runningTasks  map[string]context.CancelFunc
-	compiledGraph compose.Runnable[*PTESState, *PTESState]
+	scheduler    *Scheduler
+	memberMgr    *MemberManager
+	graphState   GraphStateManager
+	taskStore    *TaskStore
+	analyzer     ScanAnalyzer
+	planner      Planner
+	chatModel    model.ToolCallingChatModel
+	agent        adk.Agent
+	toolProvider func() []tool.BaseTool
+	toolSet      map[string]tool.EnhancedInvokableTool
+	mu           sync.RWMutex
+	runningTasks map[string]context.CancelFunc
 }
 
 type GraphStateManager interface {
@@ -83,7 +86,7 @@ func (ts *TaskStore) List() []*protocol.Task {
 	return result
 }
 
-func NewOrchestrator(scheduler *Scheduler, memberMgr *MemberManager, graphState GraphStateManager, analyzer ScanAnalyzer, planner Planner) *Orchestrator {
+func NewOrchestrator(scheduler *Scheduler, memberMgr *MemberManager, graphState GraphStateManager, analyzer ScanAnalyzer, planner Planner, chatModel model.ToolCallingChatModel) *Orchestrator {
 	if analyzer == nil {
 		analyzer = NoopScanAnalyzer{}
 	}
@@ -94,6 +97,7 @@ func NewOrchestrator(scheduler *Scheduler, memberMgr *MemberManager, graphState 
 		taskStore:    NewTaskStore(),
 		analyzer:     analyzer,
 		planner:      planner,
+		chatModel:    chatModel,
 		toolSet:      make(map[string]tool.EnhancedInvokableTool),
 		runningTasks: make(map[string]context.CancelFunc),
 	}
@@ -123,179 +127,16 @@ func (o *Orchestrator) RefreshToolSet() {
 	}
 }
 
-func (o *Orchestrator) InitGraph(ctx context.Context) error {
-	g, err := o.buildGraph()
+func (o *Orchestrator) InitAgent(ctx context.Context) error {
+	if o.chatModel == nil {
+		return fmt.Errorf("chat model not configured")
+	}
+	agent, err := BuildPlanExecuteAgent(ctx, o.chatModel, o)
 	if err != nil {
-		return fmt.Errorf("build graph: %w", err)
+		return fmt.Errorf("build plan execute agent: %w", err)
 	}
-
-	opts := []compose.GraphCompileOption{
-		compose.WithGraphName("ptes-pipeline"),
-	}
-	if o.graphState != nil {
-		opts = append(opts, compose.WithGraphCompileCallbacks(o.graphState.GraphCompileCallback("__template__")))
-	}
-
-	runnable, err := g.Compile(ctx, opts...)
-	if err != nil {
-		return fmt.Errorf("compile graph: %w", err)
-	}
-
-	o.compiledGraph = runnable
+	o.agent = agent
 	return nil
-}
-
-func (o *Orchestrator) buildGraph() (*compose.Graph[*PTESState, *PTESState], error) {
-	g := compose.NewGraph[*PTESState, *PTESState]()
-
-	// Reconnaissance node
-	if err := g.AddLambdaNode("reconnaissance", compose.InvokableLambda(o.reconNode)); err != nil {
-		return nil, err
-	}
-
-	// Vulnerability scan node
-	if err := g.AddLambdaNode("vulnerability_scan", compose.InvokableLambda(o.vulnScanNode)); err != nil {
-		return nil, err
-	}
-
-	// Branch: if recon succeeded, go to vuln_scan; otherwise END
-	branch := compose.NewGraphBranch[*PTESState](func(ctx context.Context, state *PTESState) (string, error) {
-		if r := state.Results[protocol.TaskTypeReconnaissance]; r != nil {
-			return "vulnerability_scan", nil
-		}
-		return compose.END, nil
-	}, map[string]bool{"vulnerability_scan": true, compose.END: true})
-
-	if err := g.AddBranch("reconnaissance", branch); err != nil {
-		return nil, err
-	}
-
-	g.AddEdge(compose.START, "reconnaissance")
-	g.AddEdge("vulnerability_scan", compose.END)
-
-	return g, nil
-}
-
-// buildGraphFromPlan dynamically constructs a Graph based on the task plan.
-func (o *Orchestrator) buildGraphFromPlan(plan *TaskPlan) (*compose.Graph[*PTESState, *PTESState], error) {
-	g := compose.NewGraph[*PTESState, *PTESState]()
-
-	if len(plan.Phases) == 0 {
-		return nil, fmt.Errorf("plan has no phases")
-	}
-
-	prevNode := compose.START
-	for _, phase := range plan.Phases {
-		nodeName := phase.Phase
-		taskType := phaseToTaskType(nodeName)
-		toolName := phase.Tool
-		if toolName == "" {
-			toolName = defaultToolForPhase(nodeName)
-		}
-
-		// Capture loop variables for closure
-		phaseName := nodeName
-		phaseTaskType := taskType
-		phaseTool := toolName
-
-		if err := g.AddLambdaNode(nodeName, compose.InvokableLambda(func(ctx context.Context, state *PTESState) (*PTESState, error) {
-			return o.runPhaseNode(ctx, state, phaseName, phaseTaskType, phaseTool)
-		})); err != nil {
-			return nil, err
-		}
-
-		g.AddEdge(prevNode, nodeName)
-		prevNode = nodeName
-	}
-
-	g.AddEdge(prevNode, compose.END)
-	return g, nil
-}
-
-func phaseToTaskType(phase string) protocol.TaskType {
-	switch phase {
-	case "reconnaissance":
-		return protocol.TaskTypeReconnaissance
-	case "vulnerability_scan":
-		return protocol.TaskTypeVulnerabilityScan
-	case "exploitation":
-		return protocol.TaskTypeExploitation
-	case "post_exploitation":
-		return protocol.TaskTypePostExploitation
-	case "report_generation":
-		return protocol.TaskTypeReportGeneration
-	default:
-		return protocol.TaskType(phase)
-	}
-}
-
-func defaultToolForPhase(phase string) string {
-	switch phase {
-	case "reconnaissance":
-		return "nmap"
-	case "vulnerability_scan":
-		return "nikto"
-	default:
-		return phase
-	}
-}
-
-func (o *Orchestrator) reconNode(ctx context.Context, state *PTESState) (*PTESState, error) {
-	return o.runPhaseNode(ctx, state, "reconnaissance", protocol.TaskTypeReconnaissance, "nmap")
-}
-
-func (o *Orchestrator) vulnScanNode(ctx context.Context, state *PTESState) (*PTESState, error) {
-	return o.runPhaseNode(ctx, state, "vulnerability_scan", protocol.TaskTypeVulnerabilityScan, "nikto")
-}
-
-// runPhaseNode is a generic phase executor used by both static and dynamic graphs.
-func (o *Orchestrator) runPhaseNode(ctx context.Context, state *PTESState, nodeName string, taskType protocol.TaskType, toolName string) (*PTESState, error) {
-	if o.graphState != nil {
-		o.graphState.UpdateNode(state.TaskID, nodeName, protocol.GraphNodeStateRunning, nil, "")
-	}
-
-	task := &protocol.Task{
-		ID:     state.TaskID,
-		Type:   taskType,
-		Target: state.Target,
-		Params: state.Params,
-	}
-	result, err := o.invokeTool(ctx, task, toolName)
-
-	if o.graphState != nil {
-		if err != nil {
-			o.graphState.UpdateNode(state.TaskID, nodeName, protocol.GraphNodeStateFailed, nil, err.Error())
-		} else {
-			var output string
-			if result != nil {
-				for _, p := range result.Parts {
-					if p.Type == schema.ToolPartTypeText {
-						output = p.Text
-						break
-					}
-				}
-			}
-			o.graphState.UpdateNode(state.TaskID, nodeName, protocol.GraphNodeStateSuccess, output, "")
-		}
-	}
-
-	state.Results[taskType] = result
-
-	// LLM analysis with context from previous phases
-	if raw := extractTextFromResult(result); raw != "" && o.analyzer != nil {
-		ctxAnalyses := make(map[string]*ScanAnalysis)
-		for k, v := range state.Analysis {
-			ctxAnalyses[k] = v
-		}
-		if analysis, aerr := o.analyzer.Analyze(ctx, nodeName, raw, ctxAnalyses); aerr == nil {
-			if state.Analysis == nil {
-				state.Analysis = make(map[string]*ScanAnalysis)
-			}
-			state.Analysis[nodeName] = analysis
-		}
-	}
-
-	return state, err
 }
 
 func (o *Orchestrator) invokeTool(ctx context.Context, task *protocol.Task, toolName string) (*schema.ToolResult, error) {
@@ -341,9 +182,10 @@ func (o *Orchestrator) CreateTask(ctx context.Context, taskType protocol.TaskTyp
 	return task, nil
 }
 
-func (o *Orchestrator) ExecuteTask(ctx context.Context, task *protocol.Task) error {
-	if o.compiledGraph == nil {
-		if err := o.InitGraph(ctx); err != nil {
+// RunTask executes a task using the ADK plan-execute-replan agent.
+func (o *Orchestrator) RunTask(ctx context.Context, task *protocol.Task, input string) error {
+	if o.agent == nil {
+		if err := o.InitAgent(ctx); err != nil {
 			return err
 		}
 	}
@@ -361,169 +203,56 @@ func (o *Orchestrator) ExecuteTask(ctx context.Context, task *protocol.Task) err
 	task.Status = protocol.TaskStatusRunning
 	o.taskStore.Save(task)
 
-	state := &PTESState{
-		TaskID:   task.ID,
-		Target:   task.Target,
-		Params:   task.Params,
-		Results:  make(map[protocol.TaskType]*schema.ToolResult),
-		Analysis: make(map[string]*ScanAnalysis),
-	}
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent: o.agent,
+	})
 
 	var handler callbacks.Handler
 	if o.graphState != nil {
 		handler = o.graphState.BuildCallbackHandler(task.ID)
 	}
 
-	var opts []compose.Option
+	var opts []adk.AgentRunOption
 	if handler != nil {
-		opts = append(opts, compose.WithCallbacks(handler))
+		opts = append(opts, adk.WithCallbacks(handler))
 	}
+	opts = append(opts, adk.WithSessionValues(map[string]any{
+		"taskID": task.ID,
+	}))
 
-	finalState, err := o.compiledGraph.Invoke(ctx, state, opts...)
-	if err != nil {
-		task.Status = protocol.TaskStatusFailed
-		task.Result = &schema.ToolResult{
-			Parts: []schema.ToolOutputPart{
-				{Type: schema.ToolPartTypeText, Text: err.Error()},
-			},
-		}
-		o.taskStore.Save(task)
-		return err
-	}
+	iter := runner.Query(ctx, input, opts...)
 
-	// Aggregate results from all phases
-	var outputs []map[string]interface{}
+	var finalResponse string
 	var hasError bool
-	for phase, r := range finalState.Results {
-		if r == nil {
-			continue
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
 		}
-		entry := map[string]interface{}{
-			"phase": string(phase),
+		if event.Err != nil {
+			hasError = true
+			finalResponse = event.Err.Error()
+			break
 		}
-		var textParts []string
-		for _, p := range r.Parts {
-			if p.Type == schema.ToolPartTypeText {
-				textParts = append(textParts, p.Text)
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			msg, _ := event.Output.MessageOutput.GetMessage()
+			if msg != nil && msg.Content != "" {
+				finalResponse = msg.Content
 			}
 		}
-		if len(textParts) > 0 {
-			entry["output"] = textParts
-		}
-		outputs = append(outputs, entry)
+	}
+
+	// Gather analyses from session (set by tool middleware)
+	var analyses map[string]*ScanAnalysis
+	if val, ok := adk.GetSessionValue(ctx, "analyses"); ok {
+		analyses = val.(map[string]*ScanAnalysis)
 	}
 
 	agg := map[string]interface{}{
-		"phases": outputs,
+		"response": finalResponse,
 	}
-	if len(finalState.Analysis) > 0 {
-		agg["analysis"] = finalState.Analysis
-	}
-	aggJSON, _ := json.Marshal(agg)
-	task.Result = &schema.ToolResult{
-		Parts: []schema.ToolOutputPart{
-			{Type: schema.ToolPartTypeText, Text: string(aggJSON)},
-		},
-	}
-	if hasError {
-		task.Status = protocol.TaskStatusFailed
-	} else {
-		task.Status = protocol.TaskStatusCompleted
-	}
-	o.taskStore.Save(task)
-
-	return nil
-}
-
-// ExecuteTaskWithPlan dynamically builds a graph from the plan and executes it.
-func (o *Orchestrator) ExecuteTaskWithPlan(ctx context.Context, task *protocol.Task, plan *TaskPlan) error {
-	g, err := o.buildGraphFromPlan(plan)
-	if err != nil {
-		return fmt.Errorf("build graph from plan: %w", err)
-	}
-
-	opts := []compose.GraphCompileOption{
-		compose.WithGraphName("ptes-plan-" + task.ID),
-	}
-	if o.graphState != nil {
-		opts = append(opts, compose.WithGraphCompileCallbacks(o.graphState.GraphCompileCallback(task.ID)))
-	}
-
-	runnable, err := g.Compile(ctx, opts...)
-	if err != nil {
-		return fmt.Errorf("compile dynamic graph: %w", err)
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	o.mu.Lock()
-	o.runningTasks[task.ID] = cancel
-	o.mu.Unlock()
-	defer func() {
-		o.mu.Lock()
-		delete(o.runningTasks, task.ID)
-		o.mu.Unlock()
-	}()
-
-	task.Status = protocol.TaskStatusRunning
-	o.taskStore.Save(task)
-
-	state := &PTESState{
-		TaskID:   task.ID,
-		Target:   plan.Target,
-		Params:   nil,
-		Results:  make(map[protocol.TaskType]*schema.ToolResult),
-		Analysis: make(map[string]*ScanAnalysis),
-	}
-
-	var handler callbacks.Handler
-	if o.graphState != nil {
-		handler = o.graphState.BuildCallbackHandler(task.ID)
-	}
-
-	var runOpts []compose.Option
-	if handler != nil {
-		runOpts = append(runOpts, compose.WithCallbacks(handler))
-	}
-
-	finalState, err := runnable.Invoke(ctx, state, runOpts...)
-	if err != nil {
-		task.Status = protocol.TaskStatusFailed
-		task.Result = &schema.ToolResult{
-			Parts: []schema.ToolOutputPart{
-				{Type: schema.ToolPartTypeText, Text: err.Error()},
-			},
-		}
-		o.taskStore.Save(task)
-		return err
-	}
-
-	// Aggregate results from all phases
-	var outputs []map[string]interface{}
-	var hasError bool
-	for phase, r := range finalState.Results {
-		if r == nil {
-			continue
-		}
-		entry := map[string]interface{}{
-			"phase": string(phase),
-		}
-		var textParts []string
-		for _, p := range r.Parts {
-			if p.Type == schema.ToolPartTypeText {
-				textParts = append(textParts, p.Text)
-			}
-		}
-		if len(textParts) > 0 {
-			entry["output"] = textParts
-		}
-		outputs = append(outputs, entry)
-	}
-
-	agg := map[string]interface{}{
-		"phases": outputs,
-	}
-	if len(finalState.Analysis) > 0 {
-		agg["analysis"] = finalState.Analysis
+	if len(analyses) > 0 {
+		agg["analysis"] = analyses
 	}
 	aggJSON, _ := json.Marshal(agg)
 	task.Result = &schema.ToolResult{
@@ -547,7 +276,6 @@ func (o *Orchestrator) OnTaskResult(taskID string, result *schema.ToolResult) {
 	var taskType protocol.TaskType
 	for _, p := range result.Parts {
 		if p.Type == schema.ToolPartTypeText && p.Text != "" {
-			// try to infer task type from result content
 			var data map[string]interface{}
 			if err := json.Unmarshal([]byte(p.Text), &data); err == nil {
 				if tool, ok := data["tool"].(string); ok {
