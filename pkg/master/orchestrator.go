@@ -38,6 +38,10 @@ type Orchestrator struct {
 	toolSet      map[string]tool.EnhancedInvokableTool
 	mu           sync.RWMutex
 	runningTasks map[string]context.CancelFunc
+
+	// taskAnalyses holds accumulated LLM analyses per task, keyed by taskID then phase.
+	taskAnalyses   map[string]map[string]*ScanAnalysis
+	taskAnalysesMu sync.RWMutex
 }
 
 type GraphStateManager interface {
@@ -100,6 +104,7 @@ func NewOrchestrator(scheduler *Scheduler, memberMgr *MemberManager, graphState 
 		chatModel:    chatModel,
 		toolSet:      make(map[string]tool.EnhancedInvokableTool),
 		runningTasks: make(map[string]context.CancelFunc),
+		taskAnalyses: make(map[string]map[string]*ScanAnalysis),
 	}
 	return o
 }
@@ -203,6 +208,13 @@ func (o *Orchestrator) RunTask(ctx context.Context, task *protocol.Task, input s
 	task.Status = protocol.TaskStatusRunning
 	o.taskStore.Save(task)
 
+	// Initialize PTES graph nodes in pending state
+	if o.graphState != nil {
+		for _, phase := range []string{"reconnaissance", "vulnerability_scan", "exploitation", "post_exploitation", "report_generation"} {
+			o.graphState.UpdateNode(task.ID, phase, protocol.GraphNodeStatePending, nil, "")
+		}
+	}
+
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent: o.agent,
 	})
@@ -242,11 +254,10 @@ func (o *Orchestrator) RunTask(ctx context.Context, task *protocol.Task, input s
 		}
 	}
 
-	// Gather analyses from session (set by tool middleware)
-	var analyses map[string]*ScanAnalysis
-	if val, ok := adk.GetSessionValue(ctx, "analyses"); ok {
-		analyses = val.(map[string]*ScanAnalysis)
-	}
+	// Gather analyses accumulated by tool middleware
+	o.taskAnalysesMu.RLock()
+	analyses := o.taskAnalyses[task.ID]
+	o.taskAnalysesMu.RUnlock()
 
 	agg := map[string]interface{}{
 		"response": finalResponse,
@@ -254,6 +265,11 @@ func (o *Orchestrator) RunTask(ctx context.Context, task *protocol.Task, input s
 	if len(analyses) > 0 {
 		agg["analysis"] = analyses
 	}
+
+	// Clean up accumulated analyses for this task
+	o.taskAnalysesMu.Lock()
+	delete(o.taskAnalyses, task.ID)
+	o.taskAnalysesMu.Unlock()
 	aggJSON, _ := json.Marshal(agg)
 	task.Result = &schema.ToolResult{
 		Parts: []schema.ToolOutputPart{

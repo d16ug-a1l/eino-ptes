@@ -126,15 +126,20 @@ func newGraphStateToolMiddleware(orch *Orchestrator) compose.EnhancedInvokableTo
 			if err == nil && output != nil && output.Result != nil && orch.analyzer != nil {
 				raw := extractTextFromToolResult(output.Result)
 				if raw != "" {
-					var analyses map[string]*ScanAnalysis
-					if val, ok := adk.GetSessionValue(ctx, "analyses"); ok {
-						analyses = val.(map[string]*ScanAnalysis)
-					} else {
-						analyses = make(map[string]*ScanAnalysis)
+					orch.taskAnalysesMu.Lock()
+					if orch.taskAnalyses[taskID] == nil {
+						orch.taskAnalyses[taskID] = make(map[string]*ScanAnalysis)
 					}
-					if analysis, aerr := orch.analyzer.Analyze(ctx, phase, raw, analyses); aerr == nil {
-						analyses[phase] = analysis
-						adk.AddSessionValue(ctx, "analyses", analyses)
+					ctxAnalyses := make(map[string]*ScanAnalysis)
+					for k, v := range orch.taskAnalyses[taskID] {
+						ctxAnalyses[k] = v
+					}
+					orch.taskAnalysesMu.Unlock()
+
+					if analysis, aerr := orch.analyzer.Analyze(ctx, phase, raw, ctxAnalyses); aerr == nil {
+						orch.taskAnalysesMu.Lock()
+						orch.taskAnalyses[taskID][phase] = analysis
+						orch.taskAnalysesMu.Unlock()
 					}
 				}
 			}
