@@ -12,12 +12,12 @@ import (
 
 // ScanAnalysis holds the structured analysis result for a single scan phase.
 type ScanAnalysis struct {
-	Phase           string            `json:"phase"`
-	OpenPorts       []OpenPort        `json:"open_ports,omitempty"`
-	Risks           []Risk            `json:"risks,omitempty"`
-	Recommendations []string          `json:"recommendations,omitempty"`
-	Vulnerabilities []Vulnerability   `json:"vulnerabilities,omitempty"`
-	Summary         string            `json:"summary"`
+	Phase           string          `json:"phase"`
+	OpenPorts       []OpenPort      `json:"open_ports,omitempty"`
+	Risks           []Risk          `json:"risks,omitempty"`
+	Recommendations []string        `json:"recommendations,omitempty"`
+	Vulnerabilities []Vulnerability `json:"vulnerabilities,omitempty"`
+	Summary         string          `json:"summary"`
 }
 
 type OpenPort struct {
@@ -40,8 +40,9 @@ type Vulnerability struct {
 }
 
 // ScanAnalyzer analyzes raw scan output and produces structured findings.
+// Context (previous phase analyses) can be passed to enable coherent multi-phase reasoning.
 type ScanAnalyzer interface {
-	Analyze(ctx context.Context, phase string, rawOutput string) (*ScanAnalysis, error)
+	Analyze(ctx context.Context, phase string, rawOutput string, contextAnalyses map[string]*ScanAnalysis) (*ScanAnalysis, error)
 }
 
 // LLMScanAnalyzer uses a language model to analyze scan results.
@@ -55,13 +56,10 @@ func NewLLMScanAnalyzer(m model.BaseChatModel) *LLMScanAnalyzer {
 }
 
 // Analyze sends the raw scan output to the LLM and parses the structured response.
-func (a *LLMScanAnalyzer) Analyze(ctx context.Context, phase string, rawOutput string) (*ScanAnalysis, error) {
-	prompt := buildAnalysisPrompt(phase, rawOutput)
-
-	msgs := []*schema.Message{
-		schema.SystemMessage("You are a cybersecurity analysis expert. Respond strictly in JSON format without markdown code blocks."),
-		schema.UserMessage(prompt),
-	}
+// If contextAnalyses contains previous phase results, they are included in the prompt
+// so the model can reason coherently across the full PTES pipeline.
+func (a *LLMScanAnalyzer) Analyze(ctx context.Context, phase string, rawOutput string, contextAnalyses map[string]*ScanAnalysis) (*ScanAnalysis, error) {
+	msgs := buildAnalysisMessages(phase, rawOutput, contextAnalyses)
 
 	resp, err := a.model.Generate(ctx, msgs)
 	if err != nil {
@@ -69,7 +67,6 @@ func (a *LLMScanAnalyzer) Analyze(ctx context.Context, phase string, rawOutput s
 	}
 
 	content := strings.TrimSpace(resp.Content)
-	// Strip markdown code fences if present
 	content = stripMarkdownFences(content)
 
 	var analysis ScanAnalysis
@@ -84,20 +81,42 @@ func (a *LLMScanAnalyzer) Analyze(ctx context.Context, phase string, rawOutput s
 	return &analysis, nil
 }
 
-func buildAnalysisPrompt(phase, rawOutput string) string {
-	var sb strings.Builder
-	sb.WriteString("Analyze the following scan output and return a JSON object. ")
+func buildAnalysisMessages(phase, rawOutput string, contextAnalyses map[string]*ScanAnalysis) []*schema.Message {
+	// System instruction: role + output format constraints
+	systemContent := `You are a senior penetration testing analyst. Your job is to analyze raw security scanner output and produce structured findings in JSON.
 
+Rules:
+- Respond ONLY with a JSON object. Do not wrap it in markdown code blocks.
+- Severity/level fields must be one of: critical, high, medium, low, info.
+- Be concise but thorough. Focus on actionable findings.`
+
+	// Build user message with context + task + raw output
+	var userParts []string
+	userParts = append(userParts, fmt.Sprintf("Current phase: %s", phase))
+
+	// Inject previous phase analyses as context (memory)
+	if len(contextAnalyses) > 0 {
+		userParts = append(userParts, "\nPrevious phase findings (for context):")
+		for prevPhase, analysis := range contextAnalyses {
+			if analysis == nil {
+				continue
+			}
+			b, _ := json.Marshal(analysis)
+			userParts = append(userParts, fmt.Sprintf("- %s: %s", prevPhase, string(b)))
+		}
+	}
+
+	// Phase-specific extraction instructions
+	userParts = append(userParts, "\nExtraction requirements:")
 	switch phase {
 	case "reconnaissance":
-		sb.WriteString(`
-The output is from an nmap network scan. Extract:
-1. open_ports: array of {port, protocol, service, version}
-2. risks: array of {level, description} where level is "high", "medium", or "low"
-3. recommendations: array of strings for next steps
+		userParts = append(userParts, `The output is from an nmap network scan. Extract:
+1. open_ports: array of {port (int), protocol (string), service (string), version (string)}
+2. risks: array of {level ("high"|"medium"|"low"), description (string)}
+3. recommendations: array of strings for next penetration testing steps
 4. summary: a brief overall summary
 
-JSON schema:
+Expected JSON schema:
 {
   "open_ports": [...],
   "risks": [...],
@@ -105,14 +124,13 @@ JSON schema:
   "summary": "..."
 }`)
 	case "vulnerability_scan":
-		sb.WriteString(`
-The output is from a vulnerability scanner (nikto or similar). Extract:
-1. vulnerabilities: array of {name, severity, description, url}
-2. risks: array of {level, description}
+		userParts = append(userParts, `The output is from a web vulnerability scanner (nikto or similar). Extract:
+1. vulnerabilities: array of {name (string), severity ("critical"|"high"|"medium"|"low"|"info"), description (string), url (string, optional)}
+2. risks: array of {level ("high"|"medium"|"low"), description (string)}
 3. recommendations: array of strings for remediation
 4. summary: a brief overall summary
 
-JSON schema:
+Expected JSON schema:
 {
   "vulnerabilities": [...],
   "risks": [...],
@@ -120,13 +138,12 @@ JSON schema:
   "summary": "..."
 }`)
 	default:
-		sb.WriteString(`
-Extract:
-1. risks: array of {level, description}
+		userParts = append(userParts, `Extract:
+1. risks: array of {level ("high"|"medium"|"low"), description (string)}
 2. recommendations: array of strings
 3. summary: a brief overall summary
 
-JSON schema:
+Expected JSON schema:
 {
   "risks": [...],
   "recommendations": [...],
@@ -134,10 +151,12 @@ JSON schema:
 }`)
 	}
 
-	sb.WriteString("\n\nScan output:\n```\n")
-	sb.WriteString(rawOutput)
-	sb.WriteString("\n```\n")
-	return sb.String()
+	userParts = append(userParts, fmt.Sprintf("\nRaw scan output:\n```\n%s\n```", rawOutput))
+
+	return []*schema.Message{
+		schema.SystemMessage(systemContent),
+		schema.UserMessage(strings.Join(userParts, "\n")),
+	}
 }
 
 func stripMarkdownFences(s string) string {
@@ -150,7 +169,7 @@ func stripMarkdownFences(s string) string {
 // NoopScanAnalyzer is a fallback analyzer that does nothing.
 type NoopScanAnalyzer struct{}
 
-func (NoopScanAnalyzer) Analyze(_ context.Context, phase string, rawOutput string) (*ScanAnalysis, error) {
+func (NoopScanAnalyzer) Analyze(_ context.Context, phase string, rawOutput string, _ map[string]*ScanAnalysis) (*ScanAnalysis, error) {
 	return &ScanAnalysis{
 		Phase:   phase,
 		Summary: "LLM analysis not configured.",

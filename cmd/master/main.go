@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	openaiModel "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino-ptes/pkg/master"
 )
 
@@ -27,12 +28,16 @@ func main() {
 
 	var analyzer master.ScanAnalyzer
 	if *modelAPIKey != "" && *modelName != "" {
-		cfg := &master.OpenAIConfig{
+		cfg := &openaiModel.ChatModelConfig{
 			APIKey:  *modelAPIKey,
 			BaseURL: *modelBaseURL,
 			Model:   *modelName,
+			Timeout: 0,
 		}
-		chatModel := master.NewOpenAIChatModel(cfg)
+		chatModel, err := openaiModel.NewChatModel(context.Background(), cfg)
+		if err != nil {
+			log.Fatalf("failed to create chat model: %v", err)
+		}
 		analyzer = master.NewLLMScanAnalyzer(chatModel)
 		log.Printf("LLM analyzer enabled: model=%s, baseURL=%s", *modelName, *modelBaseURL)
 	} else {

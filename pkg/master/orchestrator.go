@@ -181,7 +181,7 @@ func (o *Orchestrator) reconNode(ctx context.Context, state *PTESState) (*PTESSt
 
 	// LLM analysis
 	if raw := extractTextFromResult(result); raw != "" && o.analyzer != nil {
-		if analysis, aerr := o.analyzer.Analyze(ctx, "reconnaissance", raw); aerr == nil {
+		if analysis, aerr := o.analyzer.Analyze(ctx, "reconnaissance", raw, nil); aerr == nil {
 			if state.Analysis == nil {
 				state.Analysis = make(map[string]*ScanAnalysis)
 			}
@@ -224,9 +224,14 @@ func (o *Orchestrator) vulnScanNode(ctx context.Context, state *PTESState) (*PTE
 
 	state.Results[protocol.TaskTypeVulnerabilityScan] = result
 
-	// LLM analysis
+	// LLM analysis with context from previous phases
 	if raw := extractTextFromResult(result); raw != "" && o.analyzer != nil {
-		if analysis, aerr := o.analyzer.Analyze(ctx, "vulnerability_scan", raw); aerr == nil {
+		// Pass reconnaissance analysis as context for coherent reasoning
+		var ctxAnalyses map[string]*ScanAnalysis
+		if prev, ok := state.Analysis["reconnaissance"]; ok {
+			ctxAnalyses = map[string]*ScanAnalysis{"reconnaissance": prev}
+		}
+		if analysis, aerr := o.analyzer.Analyze(ctx, "vulnerability_scan", raw, ctxAnalyses); aerr == nil {
 			if state.Analysis == nil {
 				state.Analysis = make(map[string]*ScanAnalysis)
 			}
