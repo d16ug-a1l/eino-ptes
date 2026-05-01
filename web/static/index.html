@@ -829,9 +829,13 @@
             html += '</div>';
 
             html += '<div class="pipeline-flow">';
+            const taskDone = task.status === 'completed' || task.status === 'failed';
             PTES_STEPS.forEach((step, idx) => {
                 const node = graph.nodes[step.key];
-                const state = node ? node.state : 'pending';
+                let state = node ? node.state : 'pending';
+                if (taskDone && state === 'pending') {
+                    state = 'skipped';
+                }
                 const timeStr = node && node.timestamp ? new Date(node.timestamp).toLocaleTimeString('zh-CN') : '';
 
                 html += `<div class="pipeline-step">`;
@@ -929,7 +933,6 @@
             if (!taskGraphs[tid]) taskGraphs[tid] = { nodes: {} };
             taskGraphs[tid].nodes[data.node_name] = data;
             if (selectedTaskId === tid) renderPipeline();
-            fetchTasks();
         }
 
         function createTask() {
